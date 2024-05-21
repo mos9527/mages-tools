@@ -57,9 +57,9 @@ int main(int argc, char* argv[])
 	auto c_repack = cmdl({ "r", "repack" });
 	if (!c_outdir || !(c_infile || c_repack)) {
 		std::cerr << "STEINS;GATE 0 - MPK Unpacker/Repacker\n";
-		std::cerr << "Usage: " << argv[0] << " -o <outdir> [infile] [repack]\n";
-		std::cerr << "	- unpacking: " << argv[0] << " -o <outdir> <infile>\n";
-		std::cerr << "	- repacking: " << argv[0] << " -o <outdir> <repack>\n";
+		std::cerr << "Usage: " << argv[0] << " -o <outdir> -i [infile] -r [repack]\n";
+		std::cerr << "	- unpacking: " << argv[0] << " -o <outdir> -i <.mpk input file>\n";
+		std::cerr << "	- repacking: " << argv[0] << " -o <outdir> -r <.mpk repacked output>\n";
 		return EXIT_FAILURE;
 	}
 	if (c_outdir) std::getline(c_outdir, args.outdir);
