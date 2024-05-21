@@ -52,13 +52,19 @@ int main(int argc, char* argv[])
 		std::string repack;
 	} args;
 
-	if (!std::getline(cmdl({ "o", "outdir" }), args.outdir) || !(std::getline(cmdl({ "i", "infile" }), args.infile) || std::getline(cmdl({ "r", "repack" }), args.repack))) {
+	auto c_outdir = cmdl({ "o", "outdir" });
+	auto c_infile = cmdl({ "i", "infile" });
+	auto c_repack = cmdl({ "r", "repack" });
+	if (!c_outdir || !(c_infile || c_repack)) {
 		std::cerr << "STEINS;GATE 0 - MPK Unpacker/Repacker\n";
-		std::cerr << "Usage: " << argv[0] << " -o <outdir> [infile] [repack]" << std::endl;
-		std::cerr << "	- unpacking: " << argv[0] << "-o <outdir> <infile>";
-		std::cerr << "	- repacking: " << argv[0] << "-o <outdir> <repack>";
+		std::cerr << "Usage: " << argv[0] << " -o <outdir> [infile] [repack]\n";
+		std::cerr << "	- unpacking: " << argv[0] << " -o <outdir> <infile>\n";
+		std::cerr << "	- repacking: " << argv[0] << " -o <outdir> <repack>\n";
 		return EXIT_FAILURE;
 	}
+	if (c_outdir) std::getline(c_outdir, args.outdir);
+	if (c_infile) std::getline(c_infile, args.infile);
+	if (c_repack) std::getline(c_repack, args.repack);
 
 	{
 		using namespace std::filesystem;
