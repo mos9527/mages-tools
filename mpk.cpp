@@ -79,7 +79,7 @@ int main(int argc, char* argv[])
 			std::sort(entries.begin(), entries.end(), [](auto& a, auto& b) {return a.first.entry_id < b.first.entry_id; });
 			
 			std::vector<uint8_t> buffer(buffer_size);
-			path output = path(args.outdir) / path(args.repack);
+			path output = path(args.repack);
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			assert(fp && "Failed to open output file");
 			
