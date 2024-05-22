@@ -5,8 +5,16 @@
 #include <filesystem>
 #include <algorithm>
 #include <span>
+#include <source_location>
 #include "argh.h"
-
+void __check(bool condition, const std::string& message = "", const std::source_location& location = std::source_location::current()) {
+	if (!condition) {
+		std::cerr << "[FATAL] @ " << location.file_name() << ":" << location.line() << " " << location.function_name() << std::endl;
+		std::cerr << message << std::endl;
+		std::abort();
+	}
+}
+#define CHECK(EXPR, ...) __check(!!(EXPR), __VA_ARGS__)
 constexpr uint32_t MPK_MAGIC = 4935757; // { 'M', 'P', 'K', '\0' };
 
 struct mpk_header {
@@ -27,8 +35,8 @@ struct mpk_entry {
 	// i.e. "0x1e_phone_rine.dds"
 	static const mpk_entry from_unpacked_filename(std::stringstream& ss) {
 		mpk_entry entry{};		
-		assert(ss >> std::hex >> entry.entry_id);
-		assert(ss.ignore() >> entry.filename);
+		CHECK(ss >> std::hex >> entry.entry_id);
+		CHECK(ss.ignore() >> entry.filename);
 		return entry;
 	}
 
@@ -77,11 +85,13 @@ int main(int argc, char* argv[])
 				buffer_size = std::max(buffer_size, file_size(path));
 			}
 			std::sort(entries.begin(), entries.end(), [](auto& a, auto& b) {return a.first.entry_id < b.first.entry_id; });
-			
+			// Sanity check : entry IDs must be unique and monotonically increasing
+			for (size_t i = 0; i < entries.size(); i++)
+				CHECK(entries[i].first.entry_id == i, "Invalid unpack source folder. Note that file IDs should be contagious and no extra files is present.");
 			std::vector<uint8_t> buffer(buffer_size);
 			path output = path(args.repack);
 			FILE* fp = fopen(output.string().c_str(), "wb");
-			assert(fp && "Failed to open output file");
+			CHECK(fp, "Failed to open output file. Does the parent path exist?");
 			
 			mpk_header hdr{};
 			hdr.magic = MPK_MAGIC;
@@ -92,7 +102,7 @@ int main(int argc, char* argv[])
 			fseek(fp, align(ftell(fp)), SEEK_SET);
 			for (auto& [entry, path] : entries) {
 				FILE* fp_in = fopen(path.string().c_str(), "rb");
-				assert(fp_in && "Failed to open input file");
+				CHECK(fp_in, "Failed to open input file");
 				entry.offset = ftell(fp);
 				entry.size_decompressed = entry.size = file_size(path);
 				fread(buffer.data(), 1, entry.size, fp_in);
@@ -109,7 +119,7 @@ int main(int argc, char* argv[])
 
 			FILE* fp = fopen(args.infile.c_str(), "rb");
 			fread(&hdr, sizeof(hdr), 1, fp);    
-			assert(hdr.magic == MPK_MAGIC && "Invalid MPK file");
+			CHECK(hdr.magic == MPK_MAGIC, "Invalid MPK file");
 
 			std::vector<mpk_entry> entries(hdr.entries);
 			fread(entries.data(), sizeof(mpk_entry), hdr.entries, fp);	
@@ -119,7 +129,7 @@ int main(int argc, char* argv[])
 			for (const auto& entry : entries) {
 				path output = path(args.outdir) / path(entry.to_unpacked_filename());
 				FILE* fp_out = fopen(output.string().c_str(), "wb");
-				assert(fp_out && "Failed to open output file");
+				CHECK(fp_out, "Failed to open output file. Does the parent path exist?");
 				fseek(fp, entry.offset, SEEK_SET);
 				fread(buffer.data(), 1, entry.size, fp);
 				fwrite(buffer.data(), 1, entry.size, fp_out);
