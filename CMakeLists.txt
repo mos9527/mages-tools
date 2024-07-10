@@ -11,4 +11,7 @@ include_directories("${CMAKE_CURRENT_SOURCE_DIR}/contrib/include")
 file(GLOB_RECURSE SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 file(GLOB_RECURSE INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-add_executable(mpk "src/mpk.cpp" ${INCLUDES})
+add_executable(mpk "src/mpk.cpp")
+target_precompile_headers(mpk PUBLIC "src/pch.hpp")
+add_executable(cpk "src/cpk.cpp")
+target_precompile_headers(cpk PUBLIC "src/pch.hpp")
