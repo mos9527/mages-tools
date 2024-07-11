@@ -1,4 +1,4 @@
-constexpr uint32_t MPK_MAGIC = 4935757; // { 'M', 'P', 'K', '\0' };
+constexpr uint32_t MPK_MAGIC = fourCC('M', 'P', 'K', '\0');
 
 struct mpk_header {
 	uint32_t magic{};
@@ -47,7 +47,8 @@ int main(int argc, char* argv[])
 	auto c_infile = cmdl({ "i", "infile" });
 	auto c_repack = cmdl({ "r", "repack" });
 	if (!c_outdir || !(c_infile || c_repack)) {
-		std::cerr << "STEINS;GATE 0 - MPK Unpacker/Repacker\n";
+		std::cerr << "MAGES. PacK - MPK Unpacker/Repacker\n";
+		std::cerr << "Works w/ S;G Steam & S;G 0 Steam Releases\n";
 		std::cerr << "Usage: " << argv[0] << " -o <outdir> -i [infile] -r [repack]\n";
 		std::cerr << "	- unpacking: " << argv[0] << " -o <outdir> -i <.mpk input file>\n";
 		std::cerr << "	- repacking: " << argv[0] << " -o <outdir> -r <.mpk repacked output>\n";
@@ -71,7 +72,7 @@ int main(int argc, char* argv[])
 			// Sanity check : entry IDs must be unique and monotonically increasing
 			for (size_t i = 0; i < entries.size(); i++)
 				CHECK(entries[i].first.entry_id == i, "Invalid unpack source folder. Note that file IDs should be contagious and no extra files is present.");
-			std::vector<uint8_t> buffer(buffer_size);
+			u8vec buffer(buffer_size);
 			path output = path(args.repack);
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file. Does the parent path exist?");
@@ -107,7 +108,7 @@ int main(int argc, char* argv[])
 			std::vector<mpk_entry> entries(hdr.entries);
 			fread(entries.data(), sizeof(mpk_entry), hdr.entries, fp);	
 
-			std::vector<uint8_t> buffer(std::max_element(entries.begin(), entries.end(), [](auto& a, auto& b) {return a.size < b.size; })->size);
+			u8vec buffer(std::max_element(entries.begin(), entries.end(), [](auto& a, auto& b) {return a.size < b.size; })->size);
 
 			for (const auto& entry : entries) {
 				path output = path(args.outdir) / path(entry.to_unpacked_filename());
