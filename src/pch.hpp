@@ -21,23 +21,22 @@ inline void __check(bool condition, const std::string& message = "", const std::
 constexpr uint32_t fourCC(const char a, const char b, const char c, const char d) {
 	return (a << 0) | (b << 8) | (c << 16) | (d << 24);
 };
-consteval uint32_t fourCCBig(const char a, const char b, const char c, const char d) {
-	return (a << 24) | (b << 16) | (c << 8) | (d << 0);
-};
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
 struct u8stream {
-	u8vec& src;
+private:	
 	size_t pos;
 	bool big_endian;
-	u8stream(u8vec& src, bool is_big_endian) : src(src), pos(0), big_endian(is_big_endian) {}		
+public:
+	u8vec& src;
+	u8stream(u8vec& src, bool is_big_endian) : src(src), pos(0), big_endian(is_big_endian) {}			
 	inline size_t tell() const {
 		return pos;
 	}
 	inline void seek(size_t pos) {
 		pos = pos;
 	}
-	inline void read_at(void* dst, size_t size, size_t offset) {
+	inline void read_at(void* dst, size_t size, size_t offset) {		
 		CHECK(offset + size <= src.size(), "read out of bounds");
 		memcpy(dst, src.data() + offset, size);
 		// We assume the code runs on a little-endian machine
