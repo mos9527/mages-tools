@@ -88,15 +88,8 @@ namespace cpk {
 		utf_table_header hdr;
 		std::unique_ptr<utf_table_stream> stream;
 		std::vector<std::string> fields_ord;
-	public:
-		std::map<std::string, utf_table_field> fields;
-		utf_table(FILE* fp, uint32_t magic) {
-			fread(&hdr, sizeof(hdr), 1, fp);
-			assert(hdr.magic == magic);
-			u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
-			apply_utf_table_data_mask(buffer);	
-			stream.reset(new utf_table_stream(buffer));
-			// populate the fields
+		void populate_fields() {			
+			assert(stream);
 			for (int i = 0; i < stream->header.fieldCount; i++) {
 				uint8_t flags = stream->read<uint8_t>();
 				utf_table_field field;
@@ -115,11 +108,31 @@ namespace cpk {
 				for (auto const& name : fields_ord) {
 					auto& field = fields[name];
 					if (!field.hasDefaultValue && field.isValid) {
-						field.values.push_back(stream->read_variant(field.type));						
+						field.values.push_back(stream->read_variant(field.type));
 					}
 				}
 			}
-			return;
+		}
+	public:
+		std::map<std::string, utf_table_field> fields;
+		utf_table(u8vec& utf_data) {
+			stream.reset(new utf_table_stream(utf_data));
+			populate_fields();
+		}
+		utf_table(u8stream&& fstream /* open in LE! */, uint32_t magic) {			
+			assert(fstream.is_big_endian() == false);
+			fstream >> hdr.magic >> hdr._pad >> hdr.length >> hdr._pad2;
+			u8vec buffer(hdr.length); std::copy(fstream.src.begin() + sizeof(hdr), fstream.src.begin() + sizeof(hdr) + hdr.length, buffer.begin());
+			stream.reset(new utf_table_stream(buffer));
+			populate_fields();
+		}
+		utf_table(FILE* fp, uint32_t magic) {
+			fread(&hdr, sizeof(hdr), 1, fp);
+			assert(hdr.magic == magic);
+			u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
+			apply_utf_table_data_mask(buffer);	
+			stream.reset(new utf_table_stream(buffer));
+			populate_fields();
 		}
 	};
 }
@@ -157,6 +170,8 @@ int main(int argc, char* argv[]) {
 			uint64_t ItocOffset = std::get<uint64_t>(cpk_table.fields["ItocOffset"].values[0]);			
 			fseek(fp, ItocOffset, 0);
 			cpk::utf_table itoc_table(fp, ITOC_MAGIC);
+			cpk::utf_table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
+			cpk::utf_table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
 			return 0;
 		}
 	}

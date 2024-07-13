@@ -29,7 +29,8 @@ private:
 	bool big_endian;
 public:
 	u8vec& src;
-	u8stream(u8vec& src, bool is_big_endian) : src(src), pos(0), big_endian(is_big_endian) {}			
+	u8stream(u8vec& src, bool is_big_endian) : src(src), pos(0), big_endian(is_big_endian) {}
+	inline bool is_big_endian() { return big_endian; }
 	inline size_t tell() const {
 		return pos;
 	}
