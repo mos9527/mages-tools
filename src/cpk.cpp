@@ -4,10 +4,7 @@ constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
 namespace cpk {
-	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;	
-	static void apply_utf_table_data_mask(u8vec& data) {
-		for (int i = 0, j = 25951; i < data.size(); i++, j *= 16661) data[i] ^= (j & 0xFF);
-	}
+	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;		
 	struct utf_table_header {
 		uint32_t magic;
 		uint32_t _pad;
@@ -118,19 +115,15 @@ namespace cpk {
 		utf_table(u8vec& utf_data) {
 			stream.reset(new utf_table_stream(utf_data));
 			populate_fields();
-		}
-		utf_table(u8stream&& fstream /* open in LE! */, uint32_t magic) {			
-			assert(fstream.is_big_endian() == false);
-			fstream >> hdr.magic >> hdr._pad >> hdr.length >> hdr._pad2;
-			u8vec buffer(hdr.length); std::copy(fstream.src.begin() + sizeof(hdr), fstream.src.begin() + sizeof(hdr) + hdr.length, buffer.begin());
-			stream.reset(new utf_table_stream(buffer));
-			populate_fields();
-		}
-		utf_table(FILE* fp, uint32_t magic) {
+		}		
+		utf_table(FILE* fp, uint32_t magic, bool masked) {
 			fread(&hdr, sizeof(hdr), 1, fp);
 			assert(hdr.magic == magic);
 			u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
-			apply_utf_table_data_mask(buffer);	
+			if (masked) {
+				for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661) 
+					buffer[i] ^= (j & 0xFF);
+			}
 			stream.reset(new utf_table_stream(buffer));
 			populate_fields();
 		}
@@ -164,12 +157,12 @@ int main(int argc, char* argv[]) {
 		using namespace std::filesystem;
 		if (args.repack.size()) { /* packing */
 		}
-		else {
+		else { /* unpacking */
 			FILE* fp = fopen(args.infile.c_str(), "rb");
-			cpk::utf_table cpk_table(fp, CPK_MAGIC);
+			cpk::utf_table cpk_table(fp, CPK_MAGIC, true);
 			uint64_t ItocOffset = std::get<uint64_t>(cpk_table.fields["ItocOffset"].values[0]);			
 			fseek(fp, ItocOffset, 0);
-			cpk::utf_table itoc_table(fp, ITOC_MAGIC);
+			cpk::utf_table itoc_table(fp, ITOC_MAGIC, true);
 			cpk::utf_table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
 			cpk::utf_table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
 			return 0;
