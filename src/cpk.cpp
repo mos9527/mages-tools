@@ -2,12 +2,12 @@
 // https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
 // https://github.com/kamikat/cpktools/blob/master/cpk/crilayla.py
 constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
-constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
+constexpr uint32_t MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
 namespace cpk {
-	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;
+	
 	namespace crilayla {
 		static void deflate(u8stream& stream, u8vec& header, u8vec& data) {
 			assert(!stream.is_big_endian());
@@ -19,9 +19,9 @@ namespace cpk {
 			header.clear(); header.resize(0x100);
 			stream.read_at(header.data(), 0x100, compressed_size + 0x10, false);
 
-			uint32_t output_size = uncompressed_size + 0x100;
-			uint32_t output_written = 0;
-			data.clear(); data.resize(output_size);
+			uint32_t data_size = uncompressed_size;
+			uint32_t data_written = 0;
+			data.clear(); data.resize(data_size);
 
 			std::span<uint8_t> compressed(stream.begin(), stream.begin() + compressed_size);
 			std::reverse(compressed.begin(), compressed.end());
@@ -44,7 +44,7 @@ namespace cpk {
 				return value == (1 << n) - 1;
 			};
 
-			while (bitstream.remain())
+			while (data_written < data_size)
 			{
 				uint8_t ctl; bitstream >> ctl;
 				if (ctl) {
@@ -58,175 +58,188 @@ namespace cpk {
 							break;
 					}
 					// fill in the referenced bytes from the *back* of the output buffer
-					offset = output_size - 1 - output_written + offset;
+					offset = data_size - 1 - data_written + offset;
 					while (ref_count--) {
-						data[output_size - 1 - output_written] = data[offset--];
-						output_written++;
+						data[data_size - 1 - data_written] = data[offset--];
+						data_written++;
 					}
 				}
 				else {
 					uint8_t byte = read_n(8); // verbatim byte. into the back.
-					data[output_size - 1 - output_written] = byte;
-					output_written++;
+					data[data_size - 1 - data_written] = byte;
+					data_written++;
 				}
 
 			}
 		}
 	};
-	struct utf_table_header {
-		uint32_t magic;
-		uint32_t _pad;
-		uint32_t length;
-		uint32_t _pad2;
-	};
-	struct utf_table_sub_header {
-		uint32_t magic;
-		uint32_t length;
-		uint16_t encoding;
-		uint16_t rowOffset;
-		uint32_t stringPoolOffset;
-		uint32_t dataPoolOffset;
-		uint32_t nameOffset;
-		uint16_t fieldCount;
-		uint16_t rowStride;
-		uint32_t rowCount;
-		static uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
-	};
-	struct utf_table_field {
-		uint8_t type;
-		std::string name;
-		bool hasDefaultValue;
-		bool isValid;
-		std::vector<utf_table_field_type> values;
-	};
-	struct utf_table_stream : public u8stream {
-	private:
-		std::span<uint8_t> get_null_string_data(uint32_t offset) {
-			uint32_t pos = header.to_file_offset(header.stringPoolOffset) + offset; offset = pos;
-			while (data[pos]) pos++;
-			return { data.begin() + offset, data.begin() + pos };
-		}
-		std::span<uint8_t> get_data_array_data(uint32_t offset, uint32_t length) {
-			uint32_t pos = header.to_file_offset(header.dataPoolOffset) + offset; offset = pos;
-			pos += length;
-			return { data.begin() + offset, data.begin() + pos };
-		}
-	public:
-		utf_table_sub_header header;
-		utf_table_stream(u8vec& data) : u8stream(data, true) {
-			*this >> header.magic >> header.length;
-			CHECK(header.magic == UTF_MAGIC_BIG);
-			*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;
-		}
-		std::string read_null_string() {
-			uint32_t offset; *this >> offset;
-			auto sp = get_null_string_data(offset);
-			return { sp.begin(), sp.end() };
-		}
-		u8vec read_data_array() {
-			uint32_t offset, length; *this >> offset >> length;
-			auto sp = get_data_array_data(offset, length);
-			return { sp.begin(), sp.end() };
-		}
-		utf_table_field_type read_variant(uint32_t type) {
-			switch (type) {
-			case 0: return read<uint8_t>(); break;
-			case 1: return read<int8_t>(); break;
-			case 2: return read<uint16_t>(); break;
-			case 3: return read<int16_t>(); break;
-			case 4: return read<uint32_t>(); break;
-			case 5: return read<int32_t>(); break;
-			case 6: return read<uint64_t>(); break;
-			case 7: return read<int64_t>(); break;
-			case 8: return read<float>(); break;
-			case 9: return read<double>(); break;
-			case 0xA: return read_null_string(); break;
-			case 0xB: return read_data_array(); break;
-			default:
-				return 0;
-			};
-		}
-	};
-	struct utf_table {
-	private:
-		utf_table_header hdr;
-		std::unique_ptr<utf_table_stream> stream;
-		std::vector<std::string> fields_ord;
-		void populate_fields() {
-			assert(stream);
-			for (int i = 0; i < stream->header.fieldCount; i++) {
-				uint8_t flags = stream->read<uint8_t>();
-				utf_table_field field;
-				field.type = flags & 0xF;
-				field.name = (flags & 0x10) ? stream->read_null_string() : "";
-				field.hasDefaultValue = (flags & 0x20) != 0;
-				field.isValid = ((flags & 0x40) != 0);
-				if (field.hasDefaultValue)
-					field.values.push_back(stream->read_variant(field.type));
-				fields_ord.push_back(field.name);
-				fields[field.name] = field;
+	
+	namespace utf {
+		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
+		struct table_header {
+			uint32_t magic;
+			uint32_t _pad;
+			uint32_t length;
+			uint32_t _pad2;
+		};
+		struct table_sub_header {
+			uint32_t magic;
+			uint32_t length;
+			uint16_t encoding;
+			uint16_t rowOffset;
+			uint32_t stringPoolOffset;
+			uint32_t dataPoolOffset;
+			uint32_t nameOffset;
+			uint16_t fieldCount;
+			uint16_t rowStride;
+			uint32_t rowCount;
+			static uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
+		};
+		struct table_field {
+			uint8_t type;
+			std::string name;
+			bool hasDefaultValue;
+			bool isValid;
+			std::vector<field_type> values;
+		};
+		struct table_stream : public u8stream {
+		private:
+			std::span<uint8_t> get_null_string_data(uint32_t offset) {
+				uint32_t pos = header.to_file_offset(header.stringPoolOffset) + offset; offset = pos;
+				while (data[pos]) pos++;
+				return { data.begin() + offset, data.begin() + pos };
 			}
-			for (int i = 0, j = 0; i < stream->header.rowCount; i++, j += stream->header.rowStride) {
-				uint32_t offset = stream->header.to_file_offset(stream->header.rowOffset) + j;
-				stream->seek(offset);
-				for (auto const& name : fields_ord) {
-					auto& field = fields[name];
-					if (!field.hasDefaultValue && field.isValid) {
+			std::span<uint8_t> get_data_array_data(uint32_t offset, uint32_t length) {
+				uint32_t pos = header.to_file_offset(header.dataPoolOffset) + offset; offset = pos;
+				pos += length;
+				return { data.begin() + offset, data.begin() + pos };
+			}
+		public:
+			table_sub_header header;
+			table_stream(u8vec& data) : u8stream(data, true) {
+				*this >> header.magic >> header.length;
+				CHECK(header.magic == MAGIC_BIG);
+				*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;
+			}
+			std::string read_null_string() {
+				uint32_t offset; *this >> offset;
+				auto sp = get_null_string_data(offset);
+				return { sp.begin(), sp.end() };
+			}
+			u8vec read_data_array() {
+				uint32_t offset, length; *this >> offset >> length;
+				auto sp = get_data_array_data(offset, length);
+				return { sp.begin(), sp.end() };
+			}
+			field_type read_variant(uint32_t type) {
+				switch (type) {
+				case 0: return read<uint8_t>(); break;
+				case 1: return read<int8_t>(); break;
+				case 2: return read<uint16_t>(); break;
+				case 3: return read<int16_t>(); break;
+				case 4: return read<uint32_t>(); break;
+				case 5: return read<int32_t>(); break;
+				case 6: return read<uint64_t>(); break;
+				case 7: return read<int64_t>(); break;
+				case 8: return read<float>(); break;
+				case 9: return read<double>(); break;
+				case 0xA: return read_null_string(); break;
+				case 0xB: return read_data_array(); break;
+				default:
+					return 0;
+				};
+			}
+		};
+		struct table {
+		private:
+			table_header hdr;
+			std::unique_ptr<table_stream> stream;
+			std::vector<std::string> fields_ord;
+			void populate_fields() {
+				assert(stream);
+				for (int i = 0; i < stream->header.fieldCount; i++) {
+					uint8_t flags = stream->read<uint8_t>();
+					table_field field;
+					field.type = flags & 0xF;
+					field.name = (flags & 0x10) ? stream->read_null_string() : "";
+					field.hasDefaultValue = (flags & 0x20) != 0;
+					field.isValid = ((flags & 0x40) != 0);
+					if (field.hasDefaultValue)
 						field.values.push_back(stream->read_variant(field.type));
+					fields_ord.push_back(field.name);
+					fields[field.name] = field;
+				}
+				for (int i = 0, j = 0; i < stream->header.rowCount; i++, j += stream->header.rowStride) {
+					uint32_t offset = stream->header.to_file_offset(stream->header.rowOffset) + j;
+					stream->seek(offset);
+					for (auto const& name : fields_ord) {
+						auto& field = fields[name];
+						if (!field.hasDefaultValue && field.isValid) {
+							field.values.push_back(stream->read_variant(field.type));
+						}
 					}
 				}
 			}
-		}
-	public:
-		std::map<std::string, utf_table_field> fields;
-		utf_table(u8vec& utf_data) {
-			stream.reset(new utf_table_stream(utf_data));
-			populate_fields();
-		}
-		utf_table(FILE* fp, uint32_t magic, bool masked) {
-			fread(&hdr, sizeof(hdr), 1, fp);
-			assert(hdr.magic == magic);
-			u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
-			if (masked) {
-				for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
-					buffer[i] ^= (j & 0xFF);
+		public:
+			std::map<std::string, table_field> fields;
+			table(u8vec& data) {
+				stream.reset(new table_stream(data));
+				populate_fields();
 			}
-			stream.reset(new utf_table_stream(buffer));
-			populate_fields();
-		}
-		uint32_t get_row_count() { return stream->header.rowCount; }
-	};
-
+			table(FILE* fp, uint32_t magic, bool masked) {
+				fread(&hdr, sizeof(hdr), 1, fp);
+				assert(hdr.magic == magic);
+				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
+				if (masked) {
+					for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
+						buffer[i] ^= (j & 0xFF);
+				}
+				stream.reset(new table_stream(buffer));
+				populate_fields();
+			}
+			uint32_t get_row_count() { return stream->header.rowCount; }
+		};
+	}
+	
 	struct cpk {
 	private:
-		utf_table header;
+		utf::table header;
 	public:
-		std::vector<PAIR2(uint32_t)> files; // { { offset , size }, ... }
+		struct file_entry {
+			uint32_t id;
+			uint32_t offset;
+			uint32_t size;
+			uint32_t size_decompressed;
+		};
+		std::vector<file_entry> files;
 		cpk(FILE* fp) : header(fp, CPK_MAGIC, true) {			
 			uint64_t ItocOffset = std::get<uint64_t>(header.fields["ItocOffset"].values[0]);
 			uint64_t ContentOffset = std::get<uint64_t>(header.fields["ContentOffset"].values[0]);
 			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
 			fseek(fp, ItocOffset, 0);
-			utf_table itoc_table(fp, ITOC_MAGIC, true);
-			utf_table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
-			utf_table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
-
-			std::vector<PAIR2(uint32_t)> fileIds; // { { ID , size }, ... }
-			auto total_rows = dataH.get_row_count() + dataL.get_row_count();
-			fileIds.reserve(total_rows); files.reserve(total_rows);
-			auto populate_file_ids = [&](utf_table& data) {
+			utf::table itoc_table(fp, ITOC_MAGIC, true);
+			utf::table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
+			utf::table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));		
+			files.reserve(dataH.get_row_count() + dataL.get_row_count());
+			auto field_cast = [](utf::table_field& field, size_t index) -> uint32_t {
+				return field.type == 0x4 ? std::get<uint32_t>(field.values[index]) : std::get<uint16_t>(field.values[index]);
+			};
+			auto populate_file_ids = [&](utf::table& data) {
 				for (uint32_t i = 0; i < data.get_row_count(); i++) {
-					uint16_t ID = std::get<uint16_t>(data.fields["ID"].values[i]);
-					auto& FileSize = data.fields["FileSize"];								 
-					fileIds.push_back({ ID, FileSize.type == 0x4 ? std::get<uint32_t>(FileSize.values[i]) : std::get<uint16_t>(FileSize.values[i]) });
+					files.push_back({
+						std::get<uint16_t>(data.fields["ID"].values[i]),
+						0,
+						field_cast(data.fields["FileSize"], i),
+						field_cast(data.fields["ExtractSize"], i)
+					});											
 				}
 			};
 			populate_file_ids(dataH); populate_file_ids(dataL);
-			std::sort(fileIds.begin(), fileIds.end()); // sort by ID
+			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
 			uint32_t offset = ContentOffset;
-			for (auto& [ID, size] : fileIds) {
-				files.push_back({ offset, size });
-				offset += size; offset = alignUp(offset, Align);
+			for (auto& file : files) {
+				file.offset = offset;
+				offset += file.size; offset = alignUp(offset, Align);
 			}
 			return;
 		}
@@ -259,26 +272,33 @@ int main(int argc, char* argv[]) {
 	{
 		using namespace std::filesystem;
 		if (args.repack.size()) { /* packing */
+			throw std::exception("not implemented");
 		}
 		else { /* unpacking */
 			FILE* fp = fopen(args.infile.c_str(), "rb");
 			CHECK(fp);
 			cpk::cpk pack(fp);
-			uint32_t buffer_size = std::max_element(pack.files.begin(), pack.files.end(), PRED(lhs.second < rhs.second))->second;
-			u8vec buffer(buffer_size), deflate_header, deflate_data;
+			u8vec buffer, deflate_header, deflate_data;
 			uint32_t id = 0;
-			for (auto& [offset, size] : pack.files) {				
-				fseek(fp, offset, 0);
-				buffer.resize(size);
-				fread(buffer.data(), 1, size, fp);
-
+			for (auto& file : pack.files) {				
+				buffer.resize(file.size);
 				u8stream buffer_stream(buffer, false);
-				cpk::crilayla::deflate(buffer_stream, deflate_header, deflate_data);
+				fseek(fp, file.offset, 0);
+				fread(buffer.data(), 1, file.size, fp);
+
 				path output = path(args.outdir) / std::to_string(id++);
 				FILE* fout = fopen(output.string().c_str(), "wb");
-				fwrite(deflate_header.data(), 1, deflate_header.size(), fout);
-				fwrite(deflate_data.data(), 1, deflate_data.size(), fout);
-				fclose(fout);
+
+				if (file.size != file.size_decompressed) {
+					cpk::crilayla::deflate(buffer_stream, deflate_header, deflate_data);
+					fwrite(deflate_header.data(), 1, deflate_header.size(), fout);
+					fwrite(deflate_data.data(), 1, deflate_data.size(), fout);
+					fclose(fout);
+				}
+				else {
+					fwrite(buffer.data(), 1, buffer.size(), fout);
+					fclose(fout);
+				}
 			}
 			return 0;
 		}
