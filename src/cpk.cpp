@@ -1,11 +1,78 @@
 // https://github.com/blueskythlikesclouds/MikuMikuLibrary/blob/master/MikuMikuLibrary/Archives/CriMw/CpkArchive.cs
 // https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
+// https://github.com/kamikat/cpktools/blob/master/cpk/crilayla.py
 constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
 constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
+constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
 namespace cpk {
 	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;
+	namespace crilayla {
+		static void deflate(u8stream& stream, u8vec& header, u8vec& data) {
+			assert(!stream.is_big_endian());
+			assert(stream.read<uint64_t>() == CRILAYLA_MAGIC);
+
+			uint32_t uncompressed_size, compressed_size;
+			stream >> uncompressed_size >> compressed_size;
+
+			header.clear(); header.resize(0x100);
+			stream.read_at(header.data(), 0x100, compressed_size + 0x10, false);
+
+			uint32_t output_size = uncompressed_size + 0x100;
+			uint32_t output_written = 0;
+			data.clear(); data.resize(output_size);
+
+			std::span<uint8_t> compressed(stream.begin(), stream.begin() + compressed_size);
+			std::reverse(compressed.begin(), compressed.end());
+
+			u8vec bits; bits.reserve(stream.remain() * 8);
+			for (auto const& byte : compressed)
+				for (int i = 0; i < 8; i++)
+					bits.push_back((byte >> (8 - i - 1) & 1)); // LE
+
+			u8stream bitstream(bits, false);
+			auto read_n = [&bitstream](char nbits) -> uint16_t {
+				uint16_t num = 0;
+				for (int i = 0; i < nbits && bitstream.remain(); i++) {
+					uint8_t bit; bitstream >> bit;
+					num |= bit << (nbits - i - 1); // LE
+				}
+				return num;
+			};
+			auto all_n_bits = [](auto value, char n) -> bool{
+				return value == (1 << n) - 1;
+			};
+
+			while (bitstream.remain())
+			{
+				uint8_t ctl; bitstream >> ctl;
+				if (ctl) {
+					auto offset = read_n(13) + 3; // backwards from the *back* of the output stream
+					size_t ref_count = 3; // previous bytes referenced. 3 minimum
+					const u8vec vle_n_bits { 2, 3, 5, 8 };
+					for (int i = 0, n_bits = vle_n_bits[0];;i++, i = std::min(i,3), n_bits = vle_n_bits[i]) {
+						uint16_t vle_length = read_n(n_bits);
+						ref_count += vle_length;
+						if (!all_n_bits(vle_length, n_bits)) 
+							break;
+					}
+					// fill in the referenced bytes from the *back* of the output buffer
+					offset = output_size - 1 - output_written + offset;
+					while (ref_count--) {
+						data[output_size - 1 - output_written] = data[offset--];
+						output_written++;
+					}
+				}
+				else {
+					uint8_t byte = read_n(8); // verbatim byte. into the back.
+					data[output_size - 1 - output_written] = byte;
+					output_written++;
+				}
+
+			}
+		}
+	};
 	struct utf_table_header {
 		uint32_t magic;
 		uint32_t _pad;
@@ -36,13 +103,13 @@ namespace cpk {
 	private:
 		std::span<uint8_t> get_null_string_data(uint32_t offset) {
 			uint32_t pos = header.to_file_offset(header.stringPoolOffset) + offset; offset = pos;
-			while (src[pos]) pos++;
-			return { src.begin() + offset, src.begin() + pos };
+			while (data[pos]) pos++;
+			return { data.begin() + offset, data.begin() + pos };
 		}
 		std::span<uint8_t> get_data_array_data(uint32_t offset, uint32_t length) {
 			uint32_t pos = header.to_file_offset(header.dataPoolOffset) + offset; offset = pos;
 			pos += length;
-			return { src.begin() + offset, src.begin() + pos };
+			return { data.begin() + offset, data.begin() + pos };
 		}
 	public:
 		utf_table_sub_header header;
@@ -80,7 +147,6 @@ namespace cpk {
 			};
 		}
 	};
-
 	struct utf_table {
 	private:
 		utf_table_header hdr;
@@ -157,7 +223,7 @@ namespace cpk {
 			};
 			populate_file_ids(dataH); populate_file_ids(dataL);
 			std::sort(fileIds.begin(), fileIds.end()); // sort by ID
-			uint64_t offset = ContentOffset;
+			uint32_t offset = ContentOffset;
 			for (auto& [ID, size] : fileIds) {
 				files.push_back({ offset, size });
 				offset += size; offset = alignUp(offset, Align);
@@ -199,16 +265,20 @@ int main(int argc, char* argv[]) {
 			CHECK(fp);
 			cpk::cpk pack(fp);
 			uint32_t buffer_size = std::max_element(pack.files.begin(), pack.files.end(), PRED(lhs.second < rhs.second))->second;
-			u8vec buffer(buffer_size);
+			u8vec buffer(buffer_size), deflate_header, deflate_data;
 			uint32_t id = 0;
 			for (auto& [offset, size] : pack.files) {				
 				fseek(fp, offset, 0);
+				buffer.resize(size);
 				fread(buffer.data(), 1, size, fp);
+
+				u8stream buffer_stream(buffer, false);
+				cpk::crilayla::deflate(buffer_stream, deflate_header, deflate_data);
 				path output = path(args.outdir) / std::to_string(id++);
-				FILE* out = fopen(output.string().c_str(), "wb");
-				CHECK(out);
-				fwrite(buffer.data(), 1, size, out);
-				fclose(out);
+				FILE* fout = fopen(output.string().c_str(), "wb");
+				fwrite(deflate_header.data(), 1, deflate_header.size(), fout);
+				fwrite(deflate_data.data(), 1, deflate_data.size(), fout);
+				fclose(fout);
 			}
 			return 0;
 		}

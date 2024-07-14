@@ -30,45 +30,73 @@ constexpr size_t alignUp(size_t size, size_t alignment) {
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
 struct u8stream {
-private:	
+private:
 	size_t pos;
 	bool big_endian;
 public:
-	u8vec& src;
-	u8stream(u8vec& src, bool is_big_endian) : src(src), pos(0), big_endian(is_big_endian) {}
+	u8vec& data;
+	u8stream(u8vec& data, bool is_big_endian) : data(data), pos(0), big_endian(is_big_endian) {}
+	// FILE* like operations
 	inline bool is_big_endian() { return big_endian; }
+	inline void resize(size_t size) { data.resize(size); }
+	inline size_t remain() const {
+		return data.size() - pos;
+	}
 	inline size_t tell() const {
 		return pos;
 	}
 	inline void seek(size_t pos) {
 		pos = pos;
 	}
-	inline void read_at(void* dst, size_t size, size_t offset) {		
-		CHECK(offset + size <= src.size(), "read out of bounds");
-		memcpy(dst, src.data() + offset, size);
-		// We assume the code runs on a little-endian machine
-		if (big_endian && size > 1) std::reverse((uint8_t*)dst, (uint8_t*)dst + size);		
+	inline void read_at(void* dst, size_t size, size_t offset, bool endianess = false) {
+		CHECK(offset + size <= data.size(), "read out of bounds");
+		memcpy(dst, data.data() + offset, size);
+		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)dst, (uint8_t*)dst + size);
 	}
-	inline void read(void* dst, size_t size) {
-		read_at(dst, size, tell());
-		pos += size;		
-	}	
+	inline void write_at(void* src, size_t size, size_t offset, bool endianess = false) {
+		CHECK(offset + size <= data.size(), "write out of bounds");
+		memcpy(data.data() + offset, src, size);
+		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)data.data() + offset, (uint8_t*)data.data() + offset + size);
+	}
+	// Stream operations
+	inline void read(void* dst, size_t size, bool endianess = false) {
+		read_at(dst, size, tell(), endianess);
+		pos += size;
+	}
+	inline void write(void* src, size_t size, bool endianess = false) {
+		write_at(src, size, tell(), endianess);
+		pos += size;
+	}
+	// Fundamental Type shorthands
 	template<Fundamental T> inline void read_at(T& dst, size_t offset) {
-		read_at(&dst, sizeof(T), offset);
+		read_at(&dst, sizeof(T), offset, true /* Fundamental types takes endianess into account */);
 	};
 	template<Fundamental T> inline void read(T& dst) {
-		read(&dst, sizeof(T));
+		read(&dst, sizeof(T), true /* Same here */);
 		return;
 	};
 	template<Fundamental T> inline T read_at(size_t offset) {
 		T dst;
-		read_at(dst, offset);
+		read_at<T>(dst, offset);
 		return dst;
 	}
 	template<Fundamental T> inline T read() {
 		T ret = read_at<T>(pos);
 		pos += sizeof(T);
 		return ret;
-	}	
+	}
 	template<Fundamental T> inline u8stream& operator>>(T& value) { read(value); return *this; }
-}; 
+	template<Fundamental T> inline void write_at(T const& src, size_t offset) {
+		T data = src;
+		write_at(&data, sizeof(T), offset, true  /* Same here */);
+	};
+	template<Fundamental T> inline void write(T const& src) {
+		T data = src;
+		write(&data, sizeof(T), true  /* Same here */);
+		return;
+	};
+	template<Fundamental T> inline u8stream& operator<<(T const& value) { write(value); return *this; }
+	// Iterators
+	inline u8vec::iterator begin() { return data.begin() + pos; }
+	inline u8vec::iterator end() { return data.end(); }
+};
