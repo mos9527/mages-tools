@@ -1,10 +1,11 @@
 // https://github.com/blueskythlikesclouds/MikuMikuLibrary/blob/master/MikuMikuLibrary/Archives/CriMw/CpkArchive.cs
+// https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
 constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
 constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
 namespace cpk {
-	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;		
+	typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> utf_table_field_type;
 	struct utf_table_header {
 		uint32_t magic;
 		uint32_t _pad;
@@ -22,7 +23,7 @@ namespace cpk {
 		uint16_t fieldCount;
 		uint16_t rowStride;
 		uint32_t rowCount;
-		uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
+		static uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
 	};
 	struct utf_table_field {
 		uint8_t type;
@@ -32,7 +33,7 @@ namespace cpk {
 		std::vector<utf_table_field_type> values;
 	};
 	struct utf_table_stream : public u8stream {
-	private:		
+	private:
 		std::span<uint8_t> get_null_string_data(uint32_t offset) {
 			uint32_t pos = header.to_file_offset(header.stringPoolOffset) + offset; offset = pos;
 			while (src[pos]) pos++;
@@ -46,9 +47,9 @@ namespace cpk {
 	public:
 		utf_table_sub_header header;
 		utf_table_stream(u8vec& data) : u8stream(data, true) {
-			*this >> header.magic >> header.length;			
+			*this >> header.magic >> header.length;
 			CHECK(header.magic == UTF_MAGIC_BIG);
-			*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;						
+			*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;
 		}
 		std::string read_null_string() {
 			uint32_t offset; *this >> offset;
@@ -78,14 +79,14 @@ namespace cpk {
 				return 0;
 			};
 		}
-	};		
+	};
 
 	struct utf_table {
 	private:
 		utf_table_header hdr;
 		std::unique_ptr<utf_table_stream> stream;
 		std::vector<std::string> fields_ord;
-		void populate_fields() {			
+		void populate_fields() {
 			assert(stream);
 			for (int i = 0; i < stream->header.fieldCount; i++) {
 				uint8_t flags = stream->read<uint8_t>();
@@ -115,17 +116,53 @@ namespace cpk {
 		utf_table(u8vec& utf_data) {
 			stream.reset(new utf_table_stream(utf_data));
 			populate_fields();
-		}		
+		}
 		utf_table(FILE* fp, uint32_t magic, bool masked) {
 			fread(&hdr, sizeof(hdr), 1, fp);
 			assert(hdr.magic == magic);
 			u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
 			if (masked) {
-				for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661) 
+				for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
 					buffer[i] ^= (j & 0xFF);
 			}
 			stream.reset(new utf_table_stream(buffer));
 			populate_fields();
+		}
+		uint32_t get_row_count() { return stream->header.rowCount; }
+	};
+
+	struct cpk {
+	private:
+		utf_table header;
+	public:
+		std::vector<PAIR2(uint32_t)> files; // { { offset , size }, ... }
+		cpk(FILE* fp) : header(fp, CPK_MAGIC, true) {			
+			uint64_t ItocOffset = std::get<uint64_t>(header.fields["ItocOffset"].values[0]);
+			uint64_t ContentOffset = std::get<uint64_t>(header.fields["ContentOffset"].values[0]);
+			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
+			fseek(fp, ItocOffset, 0);
+			utf_table itoc_table(fp, ITOC_MAGIC, true);
+			utf_table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
+			utf_table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
+
+			std::vector<PAIR2(uint32_t)> fileIds; // { { ID , size }, ... }
+			auto total_rows = dataH.get_row_count() + dataL.get_row_count();
+			fileIds.reserve(total_rows); files.reserve(total_rows);
+			auto populate_file_ids = [&](utf_table& data) {
+				for (uint32_t i = 0; i < data.get_row_count(); i++) {
+					uint16_t ID = std::get<uint16_t>(data.fields["ID"].values[i]);
+					auto& FileSize = data.fields["FileSize"];								 
+					fileIds.push_back({ ID, FileSize.type == 0x4 ? std::get<uint32_t>(FileSize.values[i]) : std::get<uint16_t>(FileSize.values[i]) });
+				}
+			};
+			populate_file_ids(dataH); populate_file_ids(dataL);
+			std::sort(fileIds.begin(), fileIds.end()); // sort by ID
+			uint64_t offset = ContentOffset;
+			for (auto& [ID, size] : fileIds) {
+				files.push_back({ offset, size });
+				offset += size; offset = alignUp(offset, Align);
+			}
+			return;
 		}
 	};
 }
@@ -159,12 +196,20 @@ int main(int argc, char* argv[]) {
 		}
 		else { /* unpacking */
 			FILE* fp = fopen(args.infile.c_str(), "rb");
-			cpk::utf_table cpk_table(fp, CPK_MAGIC, true);
-			uint64_t ItocOffset = std::get<uint64_t>(cpk_table.fields["ItocOffset"].values[0]);			
-			fseek(fp, ItocOffset, 0);
-			cpk::utf_table itoc_table(fp, ITOC_MAGIC, true);
-			cpk::utf_table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
-			cpk::utf_table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
+			CHECK(fp);
+			cpk::cpk pack(fp);
+			uint32_t buffer_size = std::max_element(pack.files.begin(), pack.files.end(), PRED(lhs.second < rhs.second))->second;
+			u8vec buffer(buffer_size);
+			uint32_t id = 0;
+			for (auto& [offset, size] : pack.files) {				
+				fseek(fp, offset, 0);
+				fread(buffer.data(), 1, size, fp);
+				path output = path(args.outdir) / std::to_string(id++);
+				FILE* out = fopen(output.string().c_str(), "wb");
+				CHECK(out);
+				fwrite(buffer.data(), 1, size, out);
+				fclose(out);
+			}
 			return 0;
 		}
 	}

@@ -10,6 +10,8 @@
 #include <source_location>
 #include <variant>
 #include "argh.h"
+#define PRED(X) [](auto const& lhs, auto const& rhs) {return X;}
+#define PAIR2(T) std::pair<T,T>
 inline void __check(bool condition, const std::string& message = "", const std::source_location& location = std::source_location::current()) {
 	if (!condition) {
 		std::cerr << "[FATAL] @ " << location.file_name() << ":" << location.line() << " " << location.function_name() << std::endl;
@@ -21,6 +23,10 @@ inline void __check(bool condition, const std::string& message = "", const std::
 constexpr uint32_t fourCC(const char a, const char b, const char c, const char d) {
 	return (a << 0) | (b << 8) | (c << 16) | (d << 24);
 };
+// https://stackoverflow.com/a/14561794
+constexpr size_t alignUp(size_t size, size_t alignment) {
+	return (size + alignment - 1) & ~(alignment - 1);
+}
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
 struct u8stream {

@@ -29,10 +29,7 @@ struct mpk_entry {
 		return ss.str();
 	}
 };
-// https://stackoverflow.com/a/14561794
-size_t align(size_t size, size_t alignment = 2048) {
-	return (size + alignment - 1) & ~(alignment - 1);
-}
+
 int main(int argc, char* argv[])
 {
 	argh::parser cmdl(argv, argh::parser::Mode::PREFER_PARAM_FOR_UNREG_OPTION);
@@ -83,7 +80,7 @@ int main(int argc, char* argv[])
 			hdr.entries = entries.size();
 			fwrite(&hdr, sizeof(hdr), 1, fp);
 			fseek(fp, hdr.entries * sizeof(mpk_entry), SEEK_CUR);
-			fseek(fp, align(ftell(fp)), SEEK_SET);
+			fseek(fp, alignUp(ftell(fp), 2048), SEEK_SET);
 			for (auto& [entry, path] : entries) {
 				FILE* fp_in = fopen(path.string().c_str(), "rb");
 				CHECK(fp_in, "Failed to open input file");
@@ -91,7 +88,7 @@ int main(int argc, char* argv[])
 				entry.size_decompressed = entry.size = file_size(path);
 				fread(buffer.data(), 1, entry.size, fp_in);
 				fwrite(buffer.data(), 1, entry.size, fp);
-				fseek(fp, align(ftell(fp)), SEEK_SET);
+				fseek(fp, alignUp(ftell(fp), 2048), SEEK_SET);
 				fclose(fp_in);
 			}
 			fseek(fp, sizeof(hdr), SEEK_SET);
