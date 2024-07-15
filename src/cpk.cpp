@@ -2,10 +2,12 @@
 // https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
 // https://github.com/kamikat/cpktools/blob/master/cpk/crilayla.py
 constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
+constexpr uint32_t CPK_MAGIC_BIG = fourCC(' ', 'K', 'P', 'C');
+constexpr uint32_t UTF_MAGIC = fourCC('@', 'U', 'T', 'F');
 constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
-constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
-constexpr uint32_t CPK_OFFSET = 8;
+constexpr uint32_t ITOC_MAGIC_BIG = fourCC('C', 'O', 'T', 'I');
+constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 namespace cpk {
 	namespace crilayla {
 		static void deflate(u8stream& stream, u8vec& header, u8vec& buffer) {
@@ -73,6 +75,7 @@ namespace cpk {
 	};
 	
 	namespace utf {
+		const uint8_t INVALID_TYPE = 255;
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
 		template<typename Cast> static Cast field_cast(utf::field_type const& field) {
 			return std::visit([&](auto&& arg) -> Cast {
@@ -104,13 +107,12 @@ namespace cpk {
 			constexpr uint32_t from_block_offset(uint32_t blk_offset) { return blk_offset - 8; }
 		};
 		struct table_field {
-			friend table;
-			uint8_t type{};
+			friend table;		
 			std::string name;
 			bool hasDefaultValue{ false };
 			bool isValid{ false };
+			uint8_t type{ INVALID_TYPE };
 			std::vector<field_type> values;
-		public:
 			table_field() = default;
 			table_field(std::string const& name) : name(name) {}
 			table_field(std::string const& name, uint8_t type, bool valid) : name(name), type(type), isValid(valid) {}
@@ -119,6 +121,7 @@ namespace cpk {
 				type = values.front().index();
 			}
 			void push_back(field_type const& value) {	
+				if (type == INVALID_TYPE) type = value.index();
 				isValid = true;
 				CHECK(value.index() == type, "Invalid field type");
 				values.push_back(value);
@@ -243,8 +246,7 @@ namespace cpk {
 					field.isValid = ((flags & 0x40) != 0);
 					if (field.hasDefaultValue)
 						field.push_back(stream.read_variant(field.type));
-					fields.ord.push_back(field.name);
-					fields.data[field.name] = field;
+					fields.insert(field.name, field);
 				}				
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
 					uint32_t offset = stream.header.to_block_offset(stream.header.rowOffset) + j;
@@ -270,7 +272,7 @@ namespace cpk {
 					if (field.name.size()) stream.write_null_string(field.name, stringPool);
 					if (field.hasDefaultValue) stream.write_variant(field.values[0], stringPool, dataPool);
 				}
-				uint32_t rowCount = fields.data[fields.ord[0]].values.size(), rowStride = 0;
+				uint32_t rowCount = fields.ord.size() ? fields.data[fields.ord[0]].values.size() : 0, rowStride = 0;
 				stream.header.rowOffset = stream.header.from_block_offset(stream.tell());
 				for (int i = 0; i < rowCount; i++) {
 					for (auto const& name : fields.ord) {
@@ -298,19 +300,26 @@ namespace cpk {
 				std::vector<std::string> ord;
 				std::map<std::string, table_field> data;
 			public:
-				table_field const& operator[](std::string const& name) const { return data.at(name); }
 				table_field& insert(std::string const& name, table_field const& field) {
 					ord.push_back(name);
-					return data[name] = field;
+					return data.insert({ name, field }).first->second;
+				}
+				table_field& insert(std::string const& name) {					
+					return insert(name, table_field(name));
+				}
+				table_field& operator[](std::string const& name) {
+					if (!data.contains(name)) insert(name);
+					return data.at(name); 
 				}
 				void reset() { ord.clear(); data.clear(); }
 			} fields;
-			static u8vec read_table_data(FILE* fp, uint32_t magic, bool masked) {
+			static u8vec read_table_data(FILE* fp, uint32_t magic) {
 				table_header hdr;
 				fread(&hdr, sizeof(hdr), 1, fp);
 				assert(hdr.magic == magic);
-				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
-				if (masked) {
+				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);				
+				if (memcmp(buffer.data(), &UTF_MAGIC, sizeof(uint32_t)) != 0) {
+					// Some CPK files has a simple XOR cipher
 					for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
 						buffer[i] ^= (j & 0xFF);
 				}
@@ -337,13 +346,13 @@ namespace cpk {
 
 	struct cpk {		
 		struct file_entry {
-			uint32_t id;
+			uint16_t id;
 			std::string path;
 			uint64_t size;
 		};
 		typedef std::vector<file_entry> file_entries;		
 		struct packed_file_entry {			
-			uint32_t id;
+			uint16_t id;
 			uint64_t offset;
 			uint64_t size;
 			uint64_t size_decompressed;
@@ -352,17 +361,64 @@ namespace cpk {
 
 		static void pack(FILE* fp, file_entries& files) {
 			const uint16_t Align = 2048;
+			const uint64_t ItocOffset = 0x100;
+			// ITOC
 			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
-			utf::table Itoc(ITOC_MAGIC), DataL(UTF_MAGIC_BIG), DataH(UTF_MAGIC_BIG);
+			utf::table Itoc(UTF_MAGIC_BIG), DataL(UTF_MAGIC_BIG), DataH(UTF_MAGIC_BIG);
+			for (auto& file : files) {
+				DataH.fields["ID"].push_back(file.id);
+				DataH.fields["FileSize"].push_back((uint32_t)file.size);
+				DataH.fields["ExtractSize"].push_back((uint32_t)file.size);
+			}			
+			Itoc.fields["DataH"].push_back(DataH.commit_to_stream().buffer);
+			// DataL is unused (since it has a max size of only 65535 bytes)
+			DataL.fields["ID"].type = DataL.fields["FileSize"].type = DataL.fields["ExtractSize"].type = 2; // uint16_t
+			Itoc.fields["DataL"].push_back(DataL.commit_to_stream().buffer);
+			auto& ItocBuffer = Itoc.commit_to_stream().buffer;
+			fseek(fp, ItocOffset, 0);
+			utf::table_header itocHdr{
+				.magic = ITOC_MAGIC,
+				.length = (uint32_t)ItocBuffer.size()
+			};
+			fwrite(&itocHdr, sizeof(itocHdr), 1, fp);
+			fwrite(ItocBuffer.data(), 1, ItocBuffer.size(), fp);
+			// Content
+			uint64_t ContentOffset = alignUp(ftell(fp), Align);
+			fseek(fp, ContentOffset, 0);
+			u8vec buffer;
+			for (auto& file : files) {
+				FILE* fin = fopen(file.path.c_str(), "rb");
+				if (fin) {
+					buffer.resize(file.size);
+					fread(buffer.data(), 1, file.size, fin);
+					fwrite(buffer.data(), 1, file.size, fp);
+					fclose(fin);
+					fseek(fp, alignUp(ftell(fp), Align), 0);
+				}
+			}
+			// CPK Header
+			utf::table CPK(UTF_MAGIC_BIG);
+			CPK.fields["Align"].push_back(Align);
+			CPK.fields["ItocOffset"].push_back(ItocOffset);
+			CPK.fields["ContentOffset"].push_back(ContentOffset);
+			auto& CPKBuffer = CPK.commit_to_stream().buffer;
+			fseek(fp, 0, 0);
+			utf::table_header cpkHdr{
+				.magic = CPK_MAGIC,
+				.length = (uint32_t)CPKBuffer.size()
+			};
+			fwrite(&cpkHdr, sizeof(cpkHdr), 1, fp);
+			fwrite(CPKBuffer.data(), 1, CPKBuffer.size(), fp);
+			fclose(fp);
 		}
 		static packed_file_entries unpack(FILE* fp) {
 			packed_file_entries files;
-			utf::table header(utf::table::read_table_data(fp, CPK_MAGIC, true));
+			utf::table header(utf::table::read_table_data(fp, CPK_MAGIC));
 			uint64_t ItocOffset = utf::field_cast<uint64_t>(header.fields["ItocOffset"].values[0]);
 			uint64_t ContentOffset = utf::field_cast<uint64_t>(header.fields["ContentOffset"].values[0]);
 			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
 			fseek(fp, ItocOffset, 0);			
-			utf::table Itoc(utf::table::read_table_data(fp, ITOC_MAGIC, true));
+			utf::table Itoc(utf::table::read_table_data(fp, ITOC_MAGIC));
 			utf::table DataL(std::get<u8vec>(Itoc.fields["DataL"].values[0]));
 			utf::table DataH(std::get<u8vec>(Itoc.fields["DataH"].values[0]));
 			files.reserve(DataH.get_row_count() + DataL.get_row_count());
@@ -419,8 +475,10 @@ int main(int argc, char* argv[]) {
 			cpk::cpk::file_entries files;
 			uint32_t id = 0;
 			for (auto& path : directory_iterator(args.outdir)) {
+				std::stringstream ss(path.path().filename().string());
+				uint16_t id; ss >> id;
 				files.push_back(cpk::cpk::file_entry{
-					.id = id++,
+					.id = id,
 					.path = path.path().string(),
 					.size = static_cast<uint32_t>(file_size(path))
 				});
