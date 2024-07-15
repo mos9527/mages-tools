@@ -43,9 +43,9 @@ public:
 	// Non-owning (copying) stream. The data is copied and owned by the stream. The source buffer is not destroyed.
 	u8stream(u8vec const& buffer, bool is_big_endian) : buffer(buffer), pos(0), big_endian(is_big_endian) {}
 	inline u8vec::pointer data() { return buffer.data(); }
-	inline size_t size() { return buffer.size(); }
+	inline size_t size() const { return buffer.size(); }
 	// FILE* like operations
-	inline bool is_big_endian() { return big_endian; }
+	inline bool is_big_endian() const { return big_endian; }
 	inline void resize(size_t size) { buffer.resize(size); }
 	inline size_t remain() const {
 		return buffer.size() - pos;
@@ -63,10 +63,11 @@ public:
 		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)dst, (uint8_t*)dst + size_read);
 		return size_read;
 	}
-	inline void write_at(void* src, size_t size, size_t offset, bool endianess = false) {		
+	inline size_t write_at(void* src, size_t size, size_t offset, bool endianess = false) {
 		buffer.resize(std::max(buffer.size(), offset + size));
 		memcpy(buffer.data() + offset, src, size);
 		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)buffer.data() + offset, (uint8_t*)buffer.data() + offset + size);
+		return size;
 	}
 	// Stream operations
 	inline size_t read(void* dst, size_t size, bool endianess = false) {
@@ -74,9 +75,10 @@ public:
 		pos += size;
 		return size_read;
 	}
-	inline void write(void* src, size_t size, bool endianess = false) {
-		write_at(src, size, tell(), endianess);
+	inline size_t write(void* src, size_t size, bool endianess = false) {
+		size = write_at(src, size, tell(), endianess);
 		pos += size;
+		return size;
 	}
 	// Fundamental Type shorthands
 	template<Fundamental T> inline void read_at(T& dst, size_t offset) {
@@ -108,13 +110,13 @@ public:
 	template<typename T> inline u8stream& operator>>(T& value) requires std::is_same_v<T, u8vec> 
 	{ 
 		value.resize(remain()); 
-		read(value.buffer(), value.size(), false); 
+		read((void*)value.data(), value.size(), false);
 		return *this; 
 	}
 	template<Fundamental T> inline u8stream& operator>>(T& value) { read(value); return *this; }
 	template<typename T> inline u8stream& operator<<(T const& value) requires std::is_same_v<T, u8vec> 
 	{ 
-		write(value.buffer(), value.size(), false); 
+		write((void*)value.data(), value.size(), false); 
 		return *this; 
 	}
 	template<Fundamental T> inline u8stream& operator<<(T const& value) { write(value); return *this; }
