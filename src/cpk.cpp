@@ -2,7 +2,7 @@
 // https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
 // https://github.com/kamikat/cpktools/blob/master/cpk/crilayla.py
 constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
-constexpr uint32_t MAGIC_BIG = fourCC('F', 'T', 'U', '@');
+constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
@@ -74,6 +74,7 @@ namespace cpk {
 	
 	namespace utf {
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
+		struct table;
 		struct table_header {
 			uint32_t magic;
 			uint32_t _pad;
@@ -95,13 +96,26 @@ namespace cpk {
 			constexpr uint32_t from_block_offset(uint32_t blk_offset) { return blk_offset - 8; }
 		};
 		struct table_field {
+			friend table;
 			uint8_t type{};
 			std::string name;
-			bool hasDefaultValue{};
-			bool isValid{};
+			bool hasDefaultValue{ false };
+			bool isValid{ false };
 			std::vector<field_type> values;
+		public:
+			table_field() = default;
+			table_field(std::string const& name) : name(name) {}
+			table_field(std::string const& name, uint8_t type, bool valid) : name(name), type(type), isValid(valid) {}
+			table_field(std::string const& name, std::vector<field_type> const& values) : name(name), values(values) {
+				isValid = true;
+				type = values.front().index();
+			}
+			void push_back(field_type const& value) {	
+				isValid = true;
+				CHECK(value.index() == type, "Invalid field type");
+				values.push_back(value);
+			}
 		};
-		struct table;
 		struct table_stream : public u8stream {
 			friend table;
 		private:
@@ -117,7 +131,7 @@ namespace cpk {
 			}
 			void read_header() {
 				*this >> header.magic >> header.length;
-				CHECK(header.magic == MAGIC_BIG);
+				CHECK(header.magic == UTF_MAGIC_BIG);
 				*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;
 			}
 			void write_header() {
@@ -136,7 +150,7 @@ namespace cpk {
 				return { sp.begin(), sp.end() };
 			}
 			size_t write_null_string(std::string const& str, u8stream& stringPool) {
-				write(stringPool.tell());
+				*this << (uint32_t)stringPool.tell();
 				size_t size = stringPool.write((void*)str.c_str(), str.size() + 1, false);				
 				return size;
 			}
@@ -146,12 +160,11 @@ namespace cpk {
 				return { sp.begin(), sp.end() };
 			}
 			size_t write_data_array(u8vec const& buffer, u8stream& dataPool) {
-				write(dataPool.tell());
-				size_t size = dataPool.write((void*)buffer.data(), buffer.size(), false);
-				write(size);				
+				*this << (uint32_t)dataPool.tell() << (uint32_t)buffer.size();
+				size_t size = dataPool.write((void*)buffer.data(), buffer.size(), false);	
 				return size;
 			}
-			constexpr static size_t get_type_size(uint32_t type) {
+			constexpr static size_t get_type_size(uint32_t type) {				
 				switch (type) {
 				case 0: return sizeof(uint8_t); break;
 				case 1: return sizeof(int8_t); break;
@@ -190,14 +203,14 @@ namespace cpk {
 			}
 			void write_variant(field_type const& value, u8stream& stringPool, u8stream& dataPool) {
 				std::visit([&](auto&& arg) {
-					using T = decltype(arg);
+					using T = std::decay_t<decltype(arg)>;
 					if constexpr (std::is_same_v<T, std::string>) {
 						write_null_string(arg, stringPool);						
 					}
-					if constexpr (std::is_same_v<T, u8vec>) {
+					else if constexpr (std::is_same_v<T, u8vec>) {
 						write_data_array(arg, dataPool);
 					}
-					if constexpr (std::is_fundamental_v<T>) {
+					else {
 						T larg = arg;
 						write(larg);
 					}
@@ -209,6 +222,9 @@ namespace cpk {
 			table_header hdr{};
 			table_stream stream;
 			void read_fields() {
+				stream.seek(0);
+				stream.read_header();
+				fields.reset();
 				for (int i = 0; i < stream.header.fieldCount; i++) {
 					uint8_t flags = stream.read<uint8_t>();
 					table_field field;
@@ -217,17 +233,17 @@ namespace cpk {
 					field.hasDefaultValue = (flags & 0x20) != 0;
 					field.isValid = ((flags & 0x40) != 0);
 					if (field.hasDefaultValue)
-						field.values.push_back(stream.read_variant(field.type));
+						field.push_back(stream.read_variant(field.type));
 					fields.ord.push_back(field.name);
 					fields.data[field.name] = field;
-				}
+				}				
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
 					uint32_t offset = stream.header.to_block_offset(stream.header.rowOffset) + j;
 					stream.seek(offset);
 					for (auto const& name : fields.ord) {
 						auto& field = fields.data[name];
 						if (!field.hasDefaultValue && field.isValid) {
-							field.values.push_back(stream.read_variant(field.type));
+							field.push_back(stream.read_variant(field.type));
 						}
 					}
 				}
@@ -256,11 +272,13 @@ namespace cpk {
 						}
 					}
 				}
+				stream.header.fieldCount = fields.ord.size();			
 				stream.header.rowCount = rowCount, stream.header.rowStride = rowStride;
 				stream.header.stringPoolOffset = stream.header.from_block_offset(stream.tell());
 				stream << stringPool.buffer;
 				stream.header.dataPoolOffset = stream.header.from_block_offset(stream.tell());
 				stream << dataPool.buffer;
+				stream.header.length = stream.tell();
 				stream.seek(0);
 				stream.write_header();
 			}
@@ -272,6 +290,11 @@ namespace cpk {
 				std::map<std::string, table_field> data;
 			public:
 				table_field const& operator[](std::string const& name) const { return data.at(name); }
+				table_field& insert(std::string const& name, table_field const& field) {
+					ord.push_back(name);
+					return data[name] = field;
+				}
+				void reset() { ord.clear(); data.clear(); }
 			} fields;
 			static u8vec read_table_data(FILE* fp, uint32_t magic, bool masked) {
 				table_header hdr;
@@ -284,6 +307,7 @@ namespace cpk {
 				}
 				return buffer;
 			}
+			
 			table(uint32_t magic) : stream(magic) {}
 			table(u8vec&& buffer) : stream(std::move(buffer)) {
 				read_fields();
@@ -292,6 +316,13 @@ namespace cpk {
 				read_fields();
 			}
 			uint32_t get_row_count() const { return stream.header.rowCount; }
+			table_stream& commit_to_stream() {
+				write_fields(); 
+				return stream;
+			}
+			void reload_from_stream() {
+				read_fields();
+			}
 		};
 	}
 	
@@ -320,9 +351,9 @@ namespace cpk {
 			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
 			fseek(fp, ItocOffset, 0);			
 			utf::table Itoc(utf::table::read_table_data(fp, ITOC_MAGIC, true));
-			utf::table dataL(std::get<u8vec>(Itoc.fields["DataL"].values[0]));
-			utf::table dataH(std::get<u8vec>(Itoc.fields["DataH"].values[0]));
-			files.reserve(dataH.get_row_count() + dataL.get_row_count());
+			utf::table DataL(std::get<u8vec>(Itoc.fields["DataL"].values[0]));
+			utf::table DataH(std::get<u8vec>(Itoc.fields["DataH"].values[0]));
+			files.reserve(DataH.get_row_count() + DataL.get_row_count());
 			auto field_cast = [](utf::table_field const& field, size_t index) -> uint32_t {
 				return field.type == 0x4 ? std::get<uint32_t>(field.values[index]) : std::get<uint16_t>(field.values[index]);
 			};
@@ -336,7 +367,7 @@ namespace cpk {
 					});											
 				}
 			};
-			populate_file_ids(dataH); populate_file_ids(dataL);
+			populate_file_ids(DataH); populate_file_ids(DataL);
 			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
 			uint32_t offset = ContentOffset;
 			for (auto& file : files) {
@@ -347,6 +378,7 @@ namespace cpk {
 		}
 	};
 }
+
 int main(int argc, char* argv[]) {
 	argh::parser cmdl(argv, argh::parser::Mode::PREFER_PARAM_FOR_UNREG_OPTION);
 
