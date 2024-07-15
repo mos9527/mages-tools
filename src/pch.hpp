@@ -29,39 +29,50 @@ constexpr size_t alignUp(size_t size, size_t alignment) {
 }
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
+// Owning u8vec wrapper with stream operations
 struct u8stream {
 private:
 	size_t pos;
 	bool big_endian;
 public:
-	u8vec& data;
-	u8stream(u8vec& data, bool is_big_endian) : data(data), pos(0), big_endian(is_big_endian) {}
+	u8vec buffer;
+	// Owning data. Initializes with a given size.
+	u8stream(size_t init_size, bool is_big_endian) : buffer(init_size), pos(0), big_endian(is_big_endian) {}
+	// Owning data. The source buffer is destroyed.
+	u8stream(u8vec&& buffer, bool is_big_endian) : buffer(buffer), pos(0), big_endian(is_big_endian) {}
+	// Non-owning (copying) stream. The data is copied and owned by the stream. The source buffer is not destroyed.
+	u8stream(u8vec const& buffer, bool is_big_endian) : buffer(buffer), pos(0), big_endian(is_big_endian) {}
+	inline u8vec::pointer data() { return buffer.data(); }
+	inline size_t size() { return buffer.size(); }
 	// FILE* like operations
 	inline bool is_big_endian() { return big_endian; }
-	inline void resize(size_t size) { data.resize(size); }
+	inline void resize(size_t size) { buffer.resize(size); }
 	inline size_t remain() const {
-		return data.size() - pos;
+		return buffer.size() - pos;
 	}
 	inline size_t tell() const {
 		return pos;
 	}
-	inline void seek(size_t pos) {
-		pos = pos;
+	inline void seek(size_t npos) {
+		pos = npos;
+		buffer.resize(std::max(buffer.size(), pos));
 	}
-	inline void read_at(void* dst, size_t size, size_t offset, bool endianess = false) {
-		CHECK(offset + size <= data.size(), "read out of bounds");
-		memcpy(dst, data.data() + offset, size);
-		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)dst, (uint8_t*)dst + size);
+	inline size_t read_at(void* dst, size_t size, size_t offset, bool endianess = false) {
+		size_t size_read = std::min(size, buffer.size() - offset);
+		memcpy(dst, buffer.data() + offset, size_read);
+		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)dst, (uint8_t*)dst + size_read);
+		return size_read;
 	}
-	inline void write_at(void* src, size_t size, size_t offset, bool endianess = false) {
-		CHECK(offset + size <= data.size(), "write out of bounds");
-		memcpy(data.data() + offset, src, size);
-		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)data.data() + offset, (uint8_t*)data.data() + offset + size);
+	inline void write_at(void* src, size_t size, size_t offset, bool endianess = false) {		
+		buffer.resize(std::max(buffer.size(), offset + size));
+		memcpy(buffer.data() + offset, src, size);
+		if (endianess && big_endian && size > 1) std::reverse((uint8_t*)buffer.data() + offset, (uint8_t*)buffer.data() + offset + size);
 	}
 	// Stream operations
-	inline void read(void* dst, size_t size, bool endianess = false) {
-		read_at(dst, size, tell(), endianess);
+	inline size_t read(void* dst, size_t size, bool endianess = false) {
+		size_t size_read = read_at(dst, size, tell(), endianess);
 		pos += size;
+		return size_read;
 	}
 	inline void write(void* src, size_t size, bool endianess = false) {
 		write_at(src, size, tell(), endianess);
@@ -69,11 +80,10 @@ public:
 	}
 	// Fundamental Type shorthands
 	template<Fundamental T> inline void read_at(T& dst, size_t offset) {
-		read_at(&dst, sizeof(T), offset, true /* Fundamental types takes endianess into account */);
+		CHECK(read_at(&dst, sizeof(T), offset, true /* Fundamental types takes endianess into account */) == sizeof(T));
 	};
 	template<Fundamental T> inline void read(T& dst) {
-		read(&dst, sizeof(T), true /* Same here */);
-		return;
+		CHECK(read(&dst, sizeof(T), true /* Same here */) == sizeof(T));
 	};
 	template<Fundamental T> inline T read_at(size_t offset) {
 		T dst;
@@ -85,18 +95,30 @@ public:
 		pos += sizeof(T);
 		return ret;
 	}
-	template<Fundamental T> inline u8stream& operator>>(T& value) { read(value); return *this; }
 	template<Fundamental T> inline void write_at(T const& src, size_t offset) {
-		T data = src;
-		write_at(&data, sizeof(T), offset, true  /* Same here */);
+		T buffer = src;
+		write_at(&buffer, sizeof(T), offset, true  /* Same here */);
 	};
 	template<Fundamental T> inline void write(T const& src) {
-		T data = src;
-		write(&data, sizeof(T), true  /* Same here */);
+		T buffer = src;
+		write(&buffer, sizeof(T), true  /* Same here */);
 		return;
 	};
+	// Stream operators
+	template<typename T> inline u8stream& operator>>(T& value) requires std::is_same_v<T, u8vec> 
+	{ 
+		value.resize(remain()); 
+		read(value.buffer(), value.size(), false); 
+		return *this; 
+	}
+	template<Fundamental T> inline u8stream& operator>>(T& value) { read(value); return *this; }
+	template<typename T> inline u8stream& operator<<(T const& value) requires std::is_same_v<T, u8vec> 
+	{ 
+		write(value.buffer(), value.size(), false); 
+		return *this; 
+	}
 	template<Fundamental T> inline u8stream& operator<<(T const& value) { write(value); return *this; }
 	// Iterators
-	inline u8vec::iterator begin() { return data.begin() + pos; }
-	inline u8vec::iterator end() { return data.end(); }
+	inline u8vec::iterator begin() { return buffer.begin() + pos; }
+	inline u8vec::iterator end() { return buffer.end(); }
 };

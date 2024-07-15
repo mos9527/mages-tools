@@ -7,31 +7,31 @@ constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t CPK_OFFSET = 8;
 namespace cpk {
-	
+	struct empty_init {};
 	namespace crilayla {
-		static void deflate(u8stream& stream, u8vec& header, u8vec& data) {
+		static void deflate(u8stream& stream, u8vec& header, u8vec& buffer) {
 			assert(!stream.is_big_endian());
 			assert(stream.read<uint64_t>() == CRILAYLA_MAGIC);
 
 			uint32_t uncompressed_size, compressed_size;
 			stream >> uncompressed_size >> compressed_size;
 
-			header.clear(); header.resize(0x100);
+			header.resize(0x100);
 			stream.read_at(header.data(), 0x100, compressed_size + 0x10, false);
 
 			uint32_t data_size = uncompressed_size;
 			uint32_t data_written = 0;
-			data.clear(); data.resize(data_size);
+			buffer.resize(data_size);
 
 			std::span<uint8_t> compressed(stream.begin(), stream.begin() + compressed_size);
 			std::reverse(compressed.begin(), compressed.end());
 
-			u8vec bits; bits.reserve(stream.remain() * 8);
+			u8vec bits; bits.reserve(compressed_size * 8);
 			for (auto const& byte : compressed)
 				for (int i = 0; i < 8; i++)
 					bits.push_back((byte >> (8 - i - 1) & 1)); // LE
+			u8stream bitstream(std::move(bits), false);
 
-			u8stream bitstream(bits, false);
 			auto read_n = [&bitstream](char nbits) -> uint16_t {
 				uint16_t num = 0;
 				for (int i = 0; i < nbits && bitstream.remain(); i++) {
@@ -60,13 +60,13 @@ namespace cpk {
 					// fill in the referenced bytes from the *back* of the output buffer
 					offset = data_size - 1 - data_written + offset;
 					while (ref_count--) {
-						data[data_size - 1 - data_written] = data[offset--];
+						buffer[data_size - 1 - data_written] = buffer[offset--];
 						data_written++;
 					}
 				}
 				else {
 					uint8_t byte = read_n(8); // verbatim byte. into the back.
-					data[data_size - 1 - data_written] = byte;
+					buffer[data_size - 1 - data_written] = byte;
 					data_written++;
 				}
 
@@ -93,43 +93,56 @@ namespace cpk {
 			uint16_t fieldCount;
 			uint16_t rowStride;
 			uint32_t rowCount;
-			static uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
+			constexpr uint32_t to_file_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
+			constexpr uint32_t from_file_offset(uint32_t file_offse) { return file_offse - 8; }
 		};
 		struct table_field {
-			uint8_t type;
+			uint8_t type{};
 			std::string name;
-			bool hasDefaultValue;
-			bool isValid;
+			bool hasDefaultValue{};
+			bool isValid{};
 			std::vector<field_type> values;
 		};
 		struct table_stream : public u8stream {
 		private:
 			std::span<uint8_t> get_null_string_data(uint32_t offset) {
 				uint32_t pos = header.to_file_offset(header.stringPoolOffset) + offset; offset = pos;
-				while (data[pos]) pos++;
-				return { data.begin() + offset, data.begin() + pos };
+				while (buffer[pos]) pos++;
+				return { buffer.begin() + offset, buffer.begin() + pos };
 			}
 			std::span<uint8_t> get_data_array_data(uint32_t offset, uint32_t length) {
 				uint32_t pos = header.to_file_offset(header.dataPoolOffset) + offset; offset = pos;
 				pos += length;
-				return { data.begin() + offset, data.begin() + pos };
+				return { buffer.begin() + offset, buffer.begin() + pos };
 			}
-		public:
-			table_sub_header header;
-			table_stream(u8vec& data) : u8stream(data, true) {
+			void populate_header() {
 				*this >> header.magic >> header.length;
 				CHECK(header.magic == MAGIC_BIG);
 				*this >> header.encoding >> header.rowOffset >> header.stringPoolOffset >> header.dataPoolOffset >> header.nameOffset >> header.fieldCount >> header.rowStride >> header.rowCount;
+			}
+		public:
+			table_sub_header header{};
+			table_stream(u8vec&& buffer) : u8stream(std::move(buffer), true) {
+				populate_header();
+			}
+			table_stream(u8vec const& buffer) : u8stream(buffer, true) {
+				populate_header();
 			}
 			std::string read_null_string() {
 				uint32_t offset; *this >> offset;
 				auto sp = get_null_string_data(offset);
 				return { sp.begin(), sp.end() };
 			}
+			void write_null_string(std::string const& str, uint32_t offset) {
+				write_at((void*)str.data(), str.size(), offset, false);
+			}
 			u8vec read_data_array() {
 				uint32_t offset, length; *this >> offset >> length;
 				auto sp = get_data_array_data(offset, length);
 				return { sp.begin(), sp.end() };
+			}
+			void write_data_array(u8vec const& buffer, uint32_t offset) {				
+				write_at((void*)buffer.data(), buffer.size(), offset, false);
 			}
 			field_type read_variant(uint32_t type) {
 				switch (type) {
@@ -153,40 +166,36 @@ namespace cpk {
 		struct table {
 		private:
 			table_header hdr;
-			std::unique_ptr<table_stream> stream;
-			std::vector<std::string> fields_ord;
+			table_stream stream;
+			std::vector<std::string> fields_ord;			
 			void populate_fields() {
-				assert(stream);
-				for (int i = 0; i < stream->header.fieldCount; i++) {
-					uint8_t flags = stream->read<uint8_t>();
+				for (int i = 0; i < stream.header.fieldCount; i++) {
+					uint8_t flags = stream.read<uint8_t>();
 					table_field field;
 					field.type = flags & 0xF;
-					field.name = (flags & 0x10) ? stream->read_null_string() : "";
+					field.name = (flags & 0x10) ? stream.read_null_string() : "";
 					field.hasDefaultValue = (flags & 0x20) != 0;
 					field.isValid = ((flags & 0x40) != 0);
 					if (field.hasDefaultValue)
-						field.values.push_back(stream->read_variant(field.type));
+						field.values.push_back(stream.read_variant(field.type));
 					fields_ord.push_back(field.name);
 					fields[field.name] = field;
 				}
-				for (int i = 0, j = 0; i < stream->header.rowCount; i++, j += stream->header.rowStride) {
-					uint32_t offset = stream->header.to_file_offset(stream->header.rowOffset) + j;
-					stream->seek(offset);
+				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
+					uint32_t offset = stream.header.to_file_offset(stream.header.rowOffset) + j;
+					stream.seek(offset);
 					for (auto const& name : fields_ord) {
 						auto& field = fields[name];
 						if (!field.hasDefaultValue && field.isValid) {
-							field.values.push_back(stream->read_variant(field.type));
+							field.values.push_back(stream.read_variant(field.type));
 						}
 					}
 				}
 			}
 		public:
 			std::map<std::string, table_field> fields;
-			table(u8vec& data) {
-				stream.reset(new table_stream(data));
-				populate_fields();
-			}
-			table(FILE* fp, uint32_t magic, bool masked) {
+			static u8vec read_table_data(FILE* fp, uint32_t magic, bool masked) {
+				table_header hdr;
 				fread(&hdr, sizeof(hdr), 1, fp);
 				assert(hdr.magic == magic);
 				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
@@ -194,10 +203,15 @@ namespace cpk {
 					for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
 						buffer[i] ^= (j & 0xFF);
 				}
-				stream.reset(new table_stream(buffer));
+				return std::move(buffer);
+			}
+			table(u8vec&& buffer) : stream(std::move(buffer)) {
 				populate_fields();
 			}
-			uint32_t get_row_count() { return stream->header.rowCount; }
+			table(u8vec const& buffer) : stream(buffer) {
+				populate_fields();
+			}
+			uint32_t get_row_count() const { return stream.header.rowCount; }
 		};
 	}
 	
@@ -212,25 +226,25 @@ namespace cpk {
 			uint32_t size_decompressed;
 		};
 		std::vector<file_entry> files;
-		cpk(FILE* fp) : header(fp, CPK_MAGIC, true) {			
+		cpk(FILE* fp) : header(utf::table::read_table_data(fp, CPK_MAGIC, true)) {
 			uint64_t ItocOffset = std::get<uint64_t>(header.fields["ItocOffset"].values[0]);
 			uint64_t ContentOffset = std::get<uint64_t>(header.fields["ContentOffset"].values[0]);
 			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
-			fseek(fp, ItocOffset, 0);
-			utf::table itoc_table(fp, ITOC_MAGIC, true);
+			fseek(fp, ItocOffset, 0);			
+			utf::table itoc_table(utf::table::read_table_data(fp, ITOC_MAGIC, true));
 			utf::table dataL(std::get<u8vec>(itoc_table.fields["DataL"].values[0]));
-			utf::table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));		
+			utf::table dataH(std::get<u8vec>(itoc_table.fields["DataH"].values[0]));
 			files.reserve(dataH.get_row_count() + dataL.get_row_count());
 			auto field_cast = [](utf::table_field& field, size_t index) -> uint32_t {
 				return field.type == 0x4 ? std::get<uint32_t>(field.values[index]) : std::get<uint16_t>(field.values[index]);
 			};
-			auto populate_file_ids = [&](utf::table& data) {
-				for (uint32_t i = 0; i < data.get_row_count(); i++) {
+			auto populate_file_ids = [&](utf::table& buffer) {
+				for (uint32_t i = 0; i < buffer.get_row_count(); i++) {
 					files.push_back({
-						std::get<uint16_t>(data.fields["ID"].values[i]),
+						std::get<uint16_t>(buffer.fields["ID"].values[i]),
 						0,
-						field_cast(data.fields["FileSize"], i),
-						field_cast(data.fields["ExtractSize"], i)
+						field_cast(buffer.fields["FileSize"], i),
+						field_cast(buffer.fields["ExtractSize"], i)
 					});											
 				}
 			};
@@ -278,25 +292,24 @@ int main(int argc, char* argv[]) {
 			FILE* fp = fopen(args.infile.c_str(), "rb");
 			CHECK(fp);
 			cpk::cpk pack(fp);
-			u8vec buffer, deflate_header, deflate_data;
 			uint32_t id = 0;
 			for (auto& file : pack.files) {				
-				buffer.resize(file.size);
-				u8stream buffer_stream(buffer, false);
+				u8stream buffer_stream(file.size, false);
 				fseek(fp, file.offset, 0);
-				fread(buffer.data(), 1, file.size, fp);
+				fread(buffer_stream.data(), 1, file.size, fp);
 
 				path output = path(args.outdir) / std::to_string(id++);
 				FILE* fout = fopen(output.string().c_str(), "wb");
 
 				if (file.size != file.size_decompressed) {
+					static u8vec deflate_header, deflate_data;
 					cpk::crilayla::deflate(buffer_stream, deflate_header, deflate_data);
 					fwrite(deflate_header.data(), 1, deflate_header.size(), fout);
 					fwrite(deflate_data.data(), 1, deflate_data.size(), fout);
 					fclose(fout);
 				}
 				else {
-					fwrite(buffer.data(), 1, buffer.size(), fout);
+					fwrite(buffer_stream.data(), 1, buffer_stream.size(), fout);
 					fclose(fout);
 				}
 			}
