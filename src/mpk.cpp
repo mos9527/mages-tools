@@ -46,6 +46,8 @@ int main(int argc, char* argv[])
 	if (!c_outdir || !(c_infile || c_repack)) {
 		std::cerr << "MAGES. PacK - MPK Unpacker/Repacker\n";
 		std::cerr << "Works w/ S;G Steam & S;G 0 Steam Releases\n";
+		std::cerr << "Note:\n";
+		std::cerr << "  - The unpacked files are named by their IDs in hex, the followed by their file name (i.e. 0x1e_phone_rine.dds)\n";		
 		std::cerr << "Usage: " << argv[0] << " -o <outdir> -i [infile] -r [repack]\n";
 		std::cerr << "	- unpacking: " << argv[0] << " -o <outdir> -i <.mpk input file>\n";
 		std::cerr << "	- repacking: " << argv[0] << " -o <outdir> -r <.mpk repacked output>\n";
@@ -60,6 +62,7 @@ int main(int argc, char* argv[])
 		if (args.repack.size()) { /* packing */
 			std::vector<std::pair<mpk_entry, path>> entries;
 			size_t buffer_size = 0;
+			CHECK(exists(args.outdir) && is_directory(args.outdir), "Invalid input directory");
 			for (auto& path : directory_iterator(args.outdir)) {
 				std::stringstream ss(path.path().filename().string());
 				entries.push_back({ mpk_entry::from_unpacked_filename(ss),path });
@@ -71,8 +74,9 @@ int main(int argc, char* argv[])
 				CHECK(entries[i].first.entry_id == i, "Invalid unpack source folder. Note that file IDs should be contagious and no extra files is present.");
 			u8vec buffer(buffer_size);
 			path output = path(args.repack);
+			create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
-			CHECK(fp, "Failed to open output file. Does the parent path exist?");
+			CHECK(fp, "Failed to open output file.");
 			
 			mpk_header hdr{};
 			hdr.magic = MPK_MAGIC;
@@ -83,7 +87,6 @@ int main(int argc, char* argv[])
 			fseek(fp, alignUp(ftell(fp), 2048), SEEK_SET);
 			for (auto& [entry, path] : entries) {
 				FILE* fp_in = fopen(path.string().c_str(), "rb");
-				CHECK(fp_in, "Failed to open input file");
 				entry.offset = ftell(fp);
 				entry.size_decompressed = entry.size = file_size(path);
 				fread(buffer.data(), 1, entry.size, fp_in);
@@ -100,18 +103,18 @@ int main(int argc, char* argv[])
 
 			FILE* fp = fopen(args.infile.c_str(), "rb");
 			fread(&hdr, sizeof(hdr), 1, fp);    
-			CHECK(hdr.magic == MPK_MAGIC, "Invalid MPK file");
+			CHECK(hdr.magic == MPK_MAGIC);
 
 			std::vector<mpk_entry> entries(hdr.entries);
 			fread(entries.data(), sizeof(mpk_entry), hdr.entries, fp);	
 
-			u8vec buffer(std::max_element(entries.begin(), entries.end(), [](auto& a, auto& b) {return a.size < b.size; })->size);
-
+			u8vec buffer;
 			for (const auto& entry : entries) {
 				path output = path(args.outdir) / path(entry.to_unpacked_filename());
+				create_directories(output.parent_path());
 				FILE* fp_out = fopen(output.string().c_str(), "wb");
-				CHECK(fp_out, "Failed to open output file. Does the parent path exist?");
 				fseek(fp, entry.offset, SEEK_SET);
+				buffer.resize(entry.size);
 				fread(buffer.data(), 1, entry.size, fp);
 				fwrite(buffer.data(), 1, entry.size, fp_out);
 				fclose(fp_out);

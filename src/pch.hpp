@@ -14,8 +14,8 @@
 #define PAIR2(T) std::pair<T,T>
 inline void __check(bool condition, const std::string& message = "", const std::source_location& location = std::source_location::current()) {
 	if (!condition) {
-		std::cerr << "[FATAL] @ " << location.file_name() << ":" << location.line() << " " << location.function_name() << std::endl;
-		std::cerr << message << std::endl;
+		std::cerr << location.file_name() << ":" << location.line() << ",at " << location.function_name() << std::endl;		
+		if (message.size()) std::cerr << "ERROR: " << message << std::endl;
 		std::abort();
 	}
 }
