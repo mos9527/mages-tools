@@ -74,6 +74,14 @@ namespace cpk {
 	
 	namespace utf {
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
+		template<typename Cast> static Cast field_cast(utf::field_type const& field) {
+			return std::visit([&](auto&& arg) -> Cast {
+				using T = std::decay_t<decltype(arg)>;
+				if constexpr (std::is_convertible_v<T, Cast>) return arg;
+				CHECK(false, "Invalid field cast");
+				return Cast{};
+			}, field);
+		}
 		struct table;
 		struct table_header {
 			uint32_t magic;
@@ -176,6 +184,7 @@ namespace cpk {
 				case 7: return sizeof(int64_t); break;
 				case 8: return sizeof(float); break;
 				case 9: return sizeof(double); break;
+				// Pointers into respective pools
 				case 0xA: return sizeof(uint32_t); break;
 				case 0xB: return sizeof(uint32_t); break;
 				default:
@@ -194,7 +203,7 @@ namespace cpk {
 				case 7: return read<int64_t>(); break;
 				case 8: return read<float>(); break;
 				case 9: return read<double>(); break;
-				// Offsets into respective pools
+				// Pointers into respective pools
 				case 0xA: return read_null_string(); break;
 				case 0xB: return read_data_array(); break;
 				default:
@@ -325,51 +334,51 @@ namespace cpk {
 			}
 		};
 	}
-	
-	struct cpk {
+
+	struct cpk {		
 		struct file_entry {
 			uint32_t id;
 			std::string path;
-			uint32_t size;
+			uint64_t size;
 		};
 		typedef std::vector<file_entry> file_entries;		
 		struct packed_file_entry {			
 			uint32_t id;
-			uint32_t offset;
-			uint32_t size;
-			uint32_t size_decompressed;
+			uint64_t offset;
+			uint64_t size;
+			uint64_t size_decompressed;
 		};
 		typedef std::vector<packed_file_entry> packed_file_entries;
 
-		static void pack(u8stream& out, file_entries const& entries) {
+		static void pack(FILE* fp, file_entries& files) {
+			const uint16_t Align = 2048;
+			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
+			utf::table Itoc(ITOC_MAGIC), DataL(UTF_MAGIC_BIG), DataH(UTF_MAGIC_BIG);
 		}
 		static packed_file_entries unpack(FILE* fp) {
 			packed_file_entries files;
 			utf::table header(utf::table::read_table_data(fp, CPK_MAGIC, true));
-			uint64_t ItocOffset = std::get<uint64_t>(header.fields["ItocOffset"].values[0]);
-			uint64_t ContentOffset = std::get<uint64_t>(header.fields["ContentOffset"].values[0]);
+			uint64_t ItocOffset = utf::field_cast<uint64_t>(header.fields["ItocOffset"].values[0]);
+			uint64_t ContentOffset = utf::field_cast<uint64_t>(header.fields["ContentOffset"].values[0]);
 			uint16_t Align = std::get<uint16_t>(header.fields["Align"].values[0]);
 			fseek(fp, ItocOffset, 0);			
 			utf::table Itoc(utf::table::read_table_data(fp, ITOC_MAGIC, true));
 			utf::table DataL(std::get<u8vec>(Itoc.fields["DataL"].values[0]));
 			utf::table DataH(std::get<u8vec>(Itoc.fields["DataH"].values[0]));
 			files.reserve(DataH.get_row_count() + DataL.get_row_count());
-			auto field_cast = [](utf::table_field const& field, size_t index) -> uint32_t {
-				return field.type == 0x4 ? std::get<uint32_t>(field.values[index]) : std::get<uint16_t>(field.values[index]);
-			};
 			auto populate_file_ids = [&](utf::table& table) {
 				for (uint32_t i = 0; i < table.get_row_count(); i++) {
 					files.push_back({
 						std::get<uint16_t>(table.fields["ID"].values[i]),
 						0,
-						field_cast(table.fields["FileSize"], i),
-						field_cast(table.fields["ExtractSize"], i)
+						utf::field_cast<uint64_t>(table.fields["FileSize"].values[i]),
+						utf::field_cast<uint64_t>(table.fields["ExtractSize"].values[i])
 					});											
 				}
 			};
 			populate_file_ids(DataH); populate_file_ids(DataL);
 			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
-			uint32_t offset = ContentOffset;
+			uint64_t offset = ContentOffset;
 			for (auto& file : files) {
 				file.offset = offset;
 				offset += file.size; offset = alignUp(offset, Align);
@@ -406,7 +415,17 @@ int main(int argc, char* argv[]) {
 	{
 		using namespace std::filesystem;
 		if (args.repack.size()) { /* packing */
-			throw std::exception("not implemented");
+			FILE* fp = fopen(args.repack.c_str(), "wb");
+			cpk::cpk::file_entries files;
+			uint32_t id = 0;
+			for (auto& path : directory_iterator(args.outdir)) {
+				files.push_back(cpk::cpk::file_entry{
+					.id = id++,
+					.path = path.path().string(),
+					.size = static_cast<uint32_t>(file_size(path))
+				});
+			}
+			cpk::cpk::pack(fp, files);
 		}
 		else { /* unpacking */
 			FILE* fp = fopen(args.infile.c_str(), "rb");
