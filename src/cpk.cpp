@@ -8,7 +8,7 @@ constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 constexpr uint32_t ITOC_MAGIC_BIG = fourCC('C', 'O', 'T', 'I');
 constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
-constexpr const char* CRI_COPYRIGHT = "(c)CRI";
+
 namespace cpk {
 	namespace crilayla {
 		static void deflate(u8stream& stream, u8vec& header, u8vec& buffer) {
@@ -176,11 +176,8 @@ namespace cpk {
 				return { sp.begin(), sp.end() };
 			}
 			size_t write_null_string(std::string const& str, u8stream& stringPool) {
-				const uint16_t Length = 0x30; // criUtfRtv_ConvFieldNameToNo -> 0x30 bytes aligned
-				CHECK(str.size() < Length, "String too long");
 				*this << (uint32_t)stringPool.tell();
-				size_t size = stringPool.write_at((void*)str.c_str(), str.size() + 1, stringPool.tell(), false);
-				stringPool.seek(stringPool.tell() + Length);
+				size_t size = stringPool.write((void*)str.c_str(), str.size() + 1, false);
 				return size;
 			}
 			u8vec read_data_array() {
@@ -281,6 +278,9 @@ namespace cpk {
 			void write_fields() {
 				stream.seek_after_header();
 				u8stream stringPool(0, false), dataPool(0, false);
+				// CPK string pool always has two strings before anything. And the look up process skips the first two char** as well.
+				// See: __int64 __fastcall criUtfRtv_LookUp(struct_a1 *a1, char *flag, char **strings)
+				stringPool << u8vec{'<','N','U','L','L','>','\0','E','l',' ','P','s','y',' ', 'K','o','n','g','r','o','o','\0'};
 				for (auto const& name : fields.ord) {
 					auto& field = fields.data[name];
 					uint8_t flags = (int)field.type;
@@ -308,7 +308,7 @@ namespace cpk {
 				stream << stringPool.buffer;
 				stream.header.dataPoolOffset = stream.header.from_block_offset(stream.tell());
 				stream << dataPool.buffer;
-				stream.header.length = stream.tell();
+				stream.header.length = stream.size() - 8;  //  E06100311:UTF header size error. (%d)+(8)>(%d). This DOES NOT the magic & padding
 				stream.seek(0);
 				stream.write_header();
 			}
@@ -383,27 +383,29 @@ namespace cpk {
 		typedef std::vector<packed_file_entry> packed_file_entries;
 
 		static void pack(FILE* fp, file_entries& files) {
+			using enum utf::field_type_enum;
 			const uint16_t Align = 2048;
 			const uint64_t ItocOffset = 0x800;
 			// ITOC
 			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
 			utf::table Itoc(UTF_MAGIC_BIG), DataL(UTF_MAGIC_BIG), DataH(UTF_MAGIC_BIG);
+			DataL.fields["ID"].set_flags(UINT16);
+			DataL.fields["FileSize"].set_flags(UINT16);
+			DataL.fields["ExtractSize"].set_flags(UINT16);
 			for (auto& file : files) {
-				DataH.fields["ID"].push_back(file.id);
+				DataH.fields["ID"].push_back((uint16_t)file.id);
 				DataH.fields["FileSize"].push_back((uint32_t)file.size);
 				DataH.fields["ExtractSize"].push_back((uint32_t)file.size);
-			}			
-			Itoc.fields["DataH"].push_back(DataH.commit_to_stream().buffer);
-			// DataL is unused (since it has a max size of only 65535 bytes)
-			DataL.fields["ID"].type = DataL.fields["FileSize"].type = DataL.fields["ExtractSize"].type = utf::field_type_enum::UINT16;
+			}
 			Itoc.fields["DataL"].push_back(DataL.commit_to_stream().buffer);
+			Itoc.fields["DataH"].push_back(DataH.commit_to_stream().buffer);
 			auto& ItocBuffer = Itoc.commit_to_stream().buffer;
-			fseek(fp, ItocOffset - 6, SEEK_SET);			
-			fwrite(CRI_COPYRIGHT, 1, 6, fp);
+			// This length offset only applies to non-CPK header packets			
 			utf::table_header itocHdr{
 				.magic = ITOC_MAGIC,
-				.length = (uint32_t)ItocBuffer.size() + 8 //  E06100311:UTF header size error. (%d)+(8)>(%d). This includes the magic & padding
+				.length = (uint32_t)ItocBuffer.size() + 0x10 
 			};
+			fseek(fp, ItocOffset, SEEK_SET);			
 			fwrite(&itocHdr, sizeof(itocHdr), 1, fp);
 			utf::table::mask_table_data(ItocBuffer);
 			fwrite(ItocBuffer.data(), 1, ItocBuffer.size(), fp);
@@ -421,50 +423,21 @@ namespace cpk {
 					fseek(fp, alignUp(ftell(fp), Align), SEEK_SET);
 				}
 			}
-			// CPK Header
-			// sub_1400ED72C
 			utf::table CPK(UTF_MAGIC_BIG);
-
-			CPK.fields["UpdateDateTime"].push_back((uint64_t)0x01);
 			CPK.fields["ContentOffset"].push_back((uint64_t)ContentOffset);
 			CPK.fields["ContentSize"].push_back((uint64_t)(ftell(fp) - ContentOffset));
-			
-			using enum utf::field_type_enum;
-			/* UNUSED */
-			CPK.fields["TocOffset"].set_flags(UINT64);
-			CPK.fields["TocSize"].set_flags(UINT64);
-			CPK.fields["EtocOffset"].set_flags(UINT64);
-			CPK.fields["EtocSize"].set_flags(UINT64);
-
 			/* ITOC */
 			CPK.fields["ItocOffset"].push_back((uint64_t)ItocOffset);
-			CPK.fields["ItocSize"].push_back((uint64_t)ItocBuffer.size());
-
-			/* UNUSED */
-			CPK.fields["GtocOffset"].set_flags(UINT64);
-			CPK.fields["GtocSize"].set_flags(UINT64);
-
+			CPK.fields["ItocSize"].push_back((uint64_t)itocHdr.length);
 			/* CPK Flags*/
-			CPK.fields["Updates"].set_flags(UINT32);
-			CPK.fields["Version"].push_back((uint16_t)0x07);
-			CPK.fields["Revision"].push_back((uint16_t)0x0e);
 			CPK.fields["Align"].push_back((uint16_t)Align);
-			CPK.fields["Sorted"].push_back((uint16_t)0x00);
-			CPK.fields["EID"].push_back((uint16_t)0x00);
-			CPK.fields["Comment"].push_back(std::string{ "" });
-			CPK.fields["Tvers"].push_back(std::string{ "CPKMC2.50.01, DLL3.30.01" });
 			CPK.fields["CpkMode"].push_back((uint32_t)0x00);
-			CPK.fields["CrcMode"].push_back((uint32_t)0x00); // Disabled
-			CPK.fields["CrcTable"].set_flags(DATA_ARRAY);
-			CPK.fields["EnableFileCrc"].push_back((uint16_t)0x00);
-			CPK.fields["EnableTocCrc"].push_back((uint16_t)0x00);
-			// CPK.fields["EnableFileName"].push_back((uint16_t)0x00);
 			auto& CPKBuffer = CPK.commit_to_stream().buffer;
 			utf::table::mask_table_data(CPKBuffer);
 			fseek(fp, 0, SEEK_SET);
 			utf::table_header cpkHdr{
 				.magic = CPK_MAGIC,
-				.length = (uint32_t)CPKBuffer.size() + 8 // E06100311
+				.length = (uint32_t)CPKBuffer.size()
 			};
 			fwrite(&cpkHdr, sizeof(cpkHdr), 1, fp);
 			fwrite(CPKBuffer.data(), 1, CPKBuffer.size(), fp);

@@ -27,6 +27,11 @@ constexpr uint32_t fourCC(const char a, const char b, const char c, const char d
 constexpr size_t alignUp(size_t size, size_t alignment) {
 	return (size + alignment - 1) & ~(alignment - 1);
 }
+inline void dump_memory(const char* fname, void* src, size_t size) {
+	FILE* f = fopen(fname, "wb");
+	fwrite(src, size, 1, f);
+	fclose(f);
+}
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
 // Owning u8vec wrapper with stream operations
