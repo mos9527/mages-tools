@@ -473,7 +473,8 @@ int main(int argc, char* argv[]) {
 		using namespace std::filesystem;
 		if (args.repack.size()) { /* packing */
 			path output = path(args.repack);
-			create_directories(output.parent_path());
+			if (output.has_parent_path() && !exists(output.parent_path())) 
+				create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file");
 			cpk::file_entries files;
@@ -501,7 +502,8 @@ int main(int argc, char* argv[]) {
 				fread(buffer_stream.data(), 1, file.size, fp);
 
 				path output = path(args.outdir) / std::to_string(id++);
-				create_directories(output.parent_path());
+				if (output.has_parent_path() && !exists(output.parent_path()))
+					create_directories(output.parent_path());
 				FILE* fout = fopen(output.string().c_str(), "wb");
 				CHECK(fout, "Failed to open output file");
 				if (file.size != file.size_decompressed) {
