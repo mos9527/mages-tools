@@ -1,9 +1,3 @@
-/*
-References:
-	https://github.com/blueskythlikesclouds/MikuMikuLibrary/blob/master/MikuMikuLibrary/Archives/CriMw/CpkArchive.cs
-	https://github.com/wmltogether/CriPakTools/blob/ab58c3d23035c54fd9321e28e556c39652a83136/LibCPK/CPK.cs#L314
-	https://github.com/kamikat/cpktools/blob/master/cpk/crilayla.py
-*/
 namespace cpk {
 	constexpr uint32_t CPK_MAGIC = fourCC('C', 'P', 'K', ' ');
 	constexpr uint32_t CPK_MAGIC_BIG = fourCC(' ', 'K', 'P', 'C');
