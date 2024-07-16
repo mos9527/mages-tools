@@ -75,7 +75,8 @@ int main(int argc, char* argv[])
 				CHECK(entries[i].first.entry_id == i, "Invalid unpack source folder. Note that file IDs should be contagious and no extra files is present.");
 			u8vec buffer(buffer_size);
 			path output = path(args.repack);
-			create_directories(output.parent_path());
+			if (output.has_parent_path() && !exists(output.parent_path()))
+				create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file.");
 			
@@ -112,7 +113,8 @@ int main(int argc, char* argv[])
 			u8vec buffer;
 			for (const auto& entry : entries) {
 				path output = path(args.outdir) / path(entry.to_unpacked_filename());
-				create_directories(output.parent_path());
+				if (output.has_parent_path() && !exists(output.parent_path()))
+					create_directories(output.parent_path());
 				FILE* fp_out = fopen(output.string().c_str(), "wb");
 				fseek(fp, entry.offset, SEEK_SET);
 				buffer.resize(entry.size);
