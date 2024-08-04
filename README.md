@@ -1,5 +1,5 @@
 # mages-tools
-Cross-platform MAGES. (and N2System too, actually) engine Modding tools.
+Cross-platform MAGES. engine Modding tools.
 
 ## Building
 You'd need [cmake](https://cmake.org/download/) and a C++20 compliant compiler to build the tools.
@@ -23,7 +23,7 @@ These tools are designed to be used from the command line, with the following sy
 #### Applicable games
 - Chaos;Head Noah (Steam)
 #### Untested games
-- Stein;Gate 0 (PS3)
+- Steins;Gate 0 (PS3)
 
 ### [mpk](https://github.com/mos9527/mages-tools/blob/main/src/mpk.cpp)
 MAGES. package file packer/unpacker.

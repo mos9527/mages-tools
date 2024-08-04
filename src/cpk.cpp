@@ -5,8 +5,7 @@ namespace cpk {
 	constexpr uint32_t UTF_MAGIC_BIG = fourCC('F', 'T', 'U', '@');
 	constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 	constexpr uint32_t ITOC_MAGIC_BIG = fourCC('C', 'O', 'T', 'I');
-	constexpr uint64_t CRILAYLA_MAGIC = 4705233847682945603; // CRILAYLA
-
+	constexpr uint64_t CRILAYLA_MAGIC = fourCC('C', 'R', 'I', 'L') | (uint64_t)fourCC('A', 'Y', 'L', 'A') << 32;
 	namespace crilayla {
 		static void deflate(u8stream& stream, u8vec& header, u8vec& buffer) {
 			CHECK(!stream.is_big_endian());
@@ -85,12 +84,11 @@ namespace cpk {
 		};
 		const size_t field_type_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
-		template<Fundamental Cast> static Cast field_cast(utf::field_type const& field) {
+		template<Fundamental Cast> static std::optional<Cast> field_cast(utf::field_type const& field) {
 			return std::visit([&](auto&& arg) -> Cast {
 				using T = std::decay_t<decltype(arg)>;
 				if constexpr (std::is_convertible_v<T, Cast>) return arg;
-				CHECK(false && "Invalid field cast");
-				return Cast{};
+				return {};
 			}, field);
 		}
 
@@ -223,7 +221,7 @@ namespace cpk {
 					field.isValid = ((flags & 0x40) != 0);
 					if (field.hasDefaultValue)
 						field.push_back(stream.read_variant((field_type_enum)field.type));
-					fields.insert(field.name, field);
+					fields[field.name] = field;
 				}				
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
 					uint32_t offset = stream.header.to_block_offset(stream.header.rowOffset) + j;
@@ -280,17 +278,12 @@ namespace cpk {
 				std::vector<std::string> ord;
 				std::map<std::string, table_field> data;
 			public:
+				const size_t size() const { return ord.size(); }
 				bool contains(std::string const& name) { return data.contains(name); }
-				table_field& insert(std::string const& name, table_field const& field) {
-					ord.push_back(name);
-					return data.insert({ name, field }).first->second;
-				}
-				table_field& insert(std::string const& name) {					
-					return insert(name, table_field(name));
-				}
 				table_field& operator[](std::string const& name) {
-					if (!data.contains(name)) insert(name);
-					return data.at(name); 
+					auto it = data.try_emplace(name, table_field{ name });
+					if (it.second) ord.push_back(name);
+					return data.at(name);
 				}
 				void reset() { ord.clear(); data.clear(); }
 			} fields;
@@ -414,8 +407,8 @@ namespace cpk {
 		static packed_file_entries unpack(FILE* fp) {
 			packed_file_entries files;
 			utf::table CPK(utf::table::read_table_data(fp, CPK_MAGIC));
-			uint64_t ItocOffset = utf::field_cast<uint64_t>(CPK.fields["ItocOffset"].values[0]);
-			uint64_t ContentOffset = utf::field_cast<uint64_t>(CPK.fields["ContentOffset"].values[0]);
+			uint64_t ItocOffset = utf::field_cast<uint64_t>(CPK.fields["ItocOffset"].values[0]).value();
+			uint64_t ContentOffset = utf::field_cast<uint64_t>(CPK.fields["ContentOffset"].values[0]).value();
 			uint16_t Align = std::get<uint16_t>(CPK.fields["Align"].values[0]);
 			fseek(fp, ItocOffset, SEEK_SET);
 			utf::table Itoc(utf::table::read_table_data(fp, ITOC_MAGIC));
@@ -424,8 +417,8 @@ namespace cpk {
 					files.push_back({
 						std::get<uint16_t>(table.fields["ID"].values[i]),
 						0,
-						utf::field_cast<uint64_t>(table.fields["FileSize"].values[i]),
-						utf::field_cast<uint64_t>(table.fields["ExtractSize"].values[i])
+						utf::field_cast<uint64_t>(table.fields["FileSize"].values[i]).value(),
+						utf::field_cast<uint64_t>(table.fields["ExtractSize"].values[i]).value()
 					});											
 				}
 			};
