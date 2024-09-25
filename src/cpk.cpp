@@ -7,7 +7,7 @@ namespace cpk {
 	constexpr uint32_t ITOC_MAGIC_BIG = fourCC('C', 'O', 'T', 'I');
 	constexpr uint64_t CRILAYLA_MAGIC = fourCC('C', 'R', 'I', 'L') | (uint64_t)fourCC('A', 'Y', 'L', 'A') << 32;
 	namespace crilayla {
-		static void deflate(u8stream& stream, u8vec& header, u8vec& buffer) {
+		static void decompress(u8stream& stream, u8vec& header, u8vec& buffer) {
 			CHECK(!stream.is_big_endian());
 			CHECK(stream.read<uint64_t>() == CRILAYLA_MAGIC);
 
@@ -24,34 +24,29 @@ namespace cpk {
 			std::span<uint8_t> compressed(stream.begin(), stream.begin() + compressed_size);
 			std::reverse(compressed.begin(), compressed.end());
 
-			u8vec bits; bits.reserve(compressed_size * 8);
-			for (auto const& byte : compressed)
-				for (int i = 0; i < 8; i++)
-					bits.push_back((byte >> (8 - i - 1) & 1)); // LE
-			u8stream bitstream(std::move(bits), false);			
-			auto read_n = [&bitstream](char nbits) -> uint16_t {
-				uint16_t num = 0;
-				for (int i = 0; i < nbits && bitstream.remain(); i++) {
-					uint8_t bit; bitstream >> bit;
-					num |= bit << (nbits - i - 1); // LE
-				}
-				return num;
+			size_t bit_pos = 0;
+			auto read_n = [&](char nbits) -> uint16_t {
+				assert(nbits <= sizeof(uint16_t) * 8);
+				uint16_t ans = 0;
+				while (bit_pos / 8 < compressed.size() && nbits--) 
+					ans <<= 1, ans |= ((compressed[bit_pos / 8] >> (7 - bit_pos % 8 /* LE */)) & 1), bit_pos++;
+				return ans;
 			};
-			auto all_n_bits = [](auto value, char n) -> bool{
+			auto all_n_bits = [](auto value, char n) -> bool {
 				return value == (1 << n) - 1;
 			};
 
 			while (data_written < data_size)
 			{
-				uint8_t ctl; bitstream >> ctl;
+				uint8_t ctl = read_n(1);
 				if (ctl) {
 					auto offset = read_n(13) + 3; // backwards from the *back* of the output stream
 					size_t ref_count = 3; // previous bytes referenced. 3 minimum
-					const u8vec vle_n_bits { 2, 3, 5, 8 };
-					for (int i = 0, n_bits = vle_n_bits[0];;i++, i = std::min(i,3), n_bits = vle_n_bits[i]) {
+					const u8vec vle_n_bits{ 2, 3, 5, 8 };
+					for (int i = 0, n_bits = vle_n_bits[0];; i++, i = std::min(i, 3), n_bits = vle_n_bits[i]) {
 						uint16_t vle_length = read_n(n_bits);
 						ref_count += vle_length;
-						if (!all_n_bits(vle_length, n_bits)) 
+						if (!all_n_bits(vle_length, n_bits))
 							break;
 					}
 					// fill in the referenced bytes from the *back* of the output buffer
@@ -70,17 +65,17 @@ namespace cpk {
 			}
 		}
 	};
-	
+
 	namespace utf {
 		enum class field_type_enum {
-			UINT8 = 0,    INT8 = 1,
-			UINT16 = 2,   INT16 = 3,
-			UINT32 = 4,   INT32 = 5,
-			UINT64 = 6,   INT64 = 7,
-			FLOAT = 8,    DOUBLE = 9,
+			UINT8 = 0, INT8 = 1,
+			UINT16 = 2, INT16 = 3,
+			UINT32 = 4, INT32 = 5,
+			UINT64 = 6, INT64 = 7,
+			FLOAT = 8, DOUBLE = 9,
 			// Pointer (32bit) types
 			STRING = 0xA, DATA_ARRAY = 0xB,
-			INVALID = -1,			
+			INVALID = -1,
 		};
 		const size_t field_type_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
@@ -89,7 +84,7 @@ namespace cpk {
 				using T = std::decay_t<decltype(arg)>;
 				if constexpr (std::is_convertible_v<T, Cast>) return arg;
 				return {};
-			}, field);
+				}, field);
 		}
 
 		struct table_header {
@@ -99,7 +94,7 @@ namespace cpk {
 		};
 		struct table_sub_header {
 			uint32_t magic;
-			uint32_t length;		
+			uint32_t length;
 			uint32_t rowOffset;
 			uint32_t stringPoolOffset;
 			uint32_t dataPoolOffset;
@@ -126,7 +121,7 @@ namespace cpk {
 				type = (field_type_enum)values.front().index();
 			}
 			void set_flags(field_type_enum ntype, bool valid = false) { type = ntype, isValid = valid; }
-			void push_back(field_type const& value) {	
+			void push_back(field_type const& value) {
 				if (type == field_type_enum::INVALID) type = (field_type_enum)value.index();
 				isValid = true;
 				CHECK((field_type_enum)value.index() == type, "Invalid field type");
@@ -173,27 +168,27 @@ namespace cpk {
 			field_type read_variant(field_type_enum type) {
 				using enum field_type_enum;
 				switch (type) {
-					case UINT8 : return read<uint8_t>(); break;
-					case INT8  : return read<int8_t>(); break;
-					case UINT16: return read<uint16_t>(); break;
-					case INT16 : return read<int16_t>(); break;
-					case UINT32: return read<uint32_t>(); break;
-					case INT32 : return read<int32_t>(); break;
-					case UINT64: return read<uint64_t>(); break;
-					case INT64 : return read<int64_t>(); break;
-					case FLOAT : return read<float>(); break;
-					case DOUBLE: return read<double>(); break;
-					case STRING: return read_null_string(); break;
-					case DATA_ARRAY: return read_data_array(); break;
-					default:
-						return 0;
+				case UINT8: return read<uint8_t>(); break;
+				case INT8: return read<int8_t>(); break;
+				case UINT16: return read<uint16_t>(); break;
+				case INT16: return read<int16_t>(); break;
+				case UINT32: return read<uint32_t>(); break;
+				case INT32: return read<int32_t>(); break;
+				case UINT64: return read<uint64_t>(); break;
+				case INT64: return read<int64_t>(); break;
+				case FLOAT: return read<float>(); break;
+				case DOUBLE: return read<double>(); break;
+				case STRING: return read_null_string(); break;
+				case DATA_ARRAY: return read_data_array(); break;
+				default:
+					return 0;
 				};
 			}
 			void write_variant(field_type const& value, u8stream& stringPool, u8stream& dataPool) {
 				std::visit([&](auto&& arg) {
 					using T = std::decay_t<decltype(arg)>;
 					if constexpr (std::is_same_v<T, std::string>) {
-						write_null_string(arg, stringPool);						
+						write_null_string(arg, stringPool);
 					}
 					else if constexpr (std::is_same_v<T, u8vec>) {
 						write_data_array(arg, dataPool);
@@ -202,7 +197,7 @@ namespace cpk {
 						T larg = arg;
 						write(larg);
 					}
-				}, value);
+					}, value);
 			}
 		};
 		struct table {
@@ -222,7 +217,7 @@ namespace cpk {
 					if (field.hasDefaultValue)
 						field.push_back(stream.read_variant((field_type_enum)field.type));
 					fields[field.name] = field;
-				}				
+				}
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
 					uint32_t offset = stream.header.to_block_offset(stream.header.rowOffset) + j;
 					stream.seek(offset);
@@ -239,7 +234,7 @@ namespace cpk {
 				u8stream stringPool(0, false), dataPool(0, false);
 				// CPK string pool always has two strings before anything. And the look up process skips the first two char** as well.
 				// See: __int64 __fastcall criUtfRtv_LookUp(struct_a1 *a1, char *flag, char **strings)
-				stringPool << u8vec{'<','N','U','L','L','>','\0','E','l',' ','P','s','y',' ', 'K','o','n','g','r','o','o','\0'};
+				stringPool << u8vec{ '<','N','U','L','L','>','\0','E','l',' ','P','s','y',' ', 'K','o','n','g','r','o','o','\0' };
 				for (auto const& name : fields.ord) {
 					auto& field = fields.data[name];
 					uint8_t flags = (int)field.type;
@@ -261,7 +256,7 @@ namespace cpk {
 						}
 					}
 				}
-				stream.header.fieldCount = fields.ord.size();			
+				stream.header.fieldCount = fields.ord.size();
 				stream.header.rowCount = rowCount, stream.header.rowStride = rowStride;
 				stream.header.stringPoolOffset = stream.header.from_block_offset(stream.tell());
 				stream << stringPool.buffer;
@@ -295,14 +290,14 @@ namespace cpk {
 				table_header hdr;
 				fread(&hdr, sizeof(hdr), 1, fp);
 				CHECK(hdr.magic == magic);
-				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);				
+				u8vec buffer(hdr.length); fread(buffer.data(), 1, hdr.length, fp);
 				if (memcmp(buffer.data(), &UTF_MAGIC, sizeof(uint32_t)) != 0) {
 					// Some CPK files has a simple XOR cipher
 					mask_table_data(buffer);
 				}
 				return buffer;
 			}
-			
+
 			table(uint32_t magic) : stream(magic) {}
 			table(u8vec&& buffer) : stream(std::move(buffer)) {
 				read_fields();
@@ -312,7 +307,7 @@ namespace cpk {
 			}
 			uint32_t get_row_count() const { return stream.header.rowCount; }
 			table_stream& commit_to_stream() {
-				write_fields(); 
+				write_fields();
 				return stream;
 			}
 			void reload_from_stream() {
@@ -327,8 +322,8 @@ namespace cpk {
 		std::string path;
 		std::optional<std::string> storedPath;
 	};
-	typedef std::vector<file_entry> file_entries;		
-	struct packed_file_entry {			
+	typedef std::vector<file_entry> file_entries;
+	struct packed_file_entry {
 		uint16_t id;
 		uint64_t offset;
 		uint64_t size;
@@ -340,10 +335,10 @@ namespace cpk {
 		- Filenames are unavailable in this mode
 		- The files are stored (and sorted) by their IDs and optionally compressed
 	*/
-	struct itoc_mode {		
+	struct itoc_mode {
 		static void pack(FILE* fp, file_entries& files) {
 			using enum utf::field_type_enum;
-			const uint32_t ITOC_HDR_LENGTH_OFFSET = 0x10;			
+			const uint32_t ITOC_HDR_LENGTH_OFFSET = 0x10;
 			const uint16_t Align = 2048;
 			const uint64_t ItocOffset = 0x800;
 			// ITOC
@@ -367,7 +362,7 @@ namespace cpk {
 				.magic = ITOC_MAGIC,
 				.length = (uint32_t)ItocBuffer.size() + ITOC_HDR_LENGTH_OFFSET
 			};
-			fseek(fp, ItocOffset, SEEK_SET);			
+			fseek(fp, ItocOffset, SEEK_SET);
 			fwrite(&itocHdr, sizeof(itocHdr), 1, fp);
 			utf::table::mask_table_data(ItocBuffer);
 			fwrite(ItocBuffer.data(), 1, ItocBuffer.size(), fp);
@@ -419,9 +414,9 @@ namespace cpk {
 						0,
 						utf::field_cast<uint64_t>(table.fields["FileSize"].values[i]).value(),
 						utf::field_cast<uint64_t>(table.fields["ExtractSize"].values[i]).value()
-					});											
+						});
 				}
-			};
+				};
 			if (Itoc.fields.contains("DataL")) { utf::table DataL(std::get<u8vec>(Itoc.fields["DataL"].values[0])); populate_file_ids(DataL); }
 			if (Itoc.fields.contains("DataH")) { utf::table DataH(std::get<u8vec>(Itoc.fields["DataH"].values[0])); populate_file_ids(DataH); }
 			std::sort(files.begin(), files.end(), PRED(lhs.id < rhs.id));
@@ -466,7 +461,7 @@ int main(int argc, char* argv[]) {
 		using namespace std::filesystem;
 		if (args.repack.size()) { /* packing */
 			path output = path(args.repack);
-			if (output.has_parent_path() && !exists(output.parent_path())) 
+			if (output.has_parent_path() && !exists(output.parent_path()))
 				create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file");
@@ -480,7 +475,7 @@ int main(int argc, char* argv[]) {
 					.id = id,
 					.size = static_cast<uint32_t>(file_size(path)),
 					.path = path.path().string()
-				});
+					});
 			}
 			cpk::itoc_mode::pack(fp, files);
 		}
@@ -501,7 +496,7 @@ int main(int argc, char* argv[]) {
 				CHECK(fout, "Failed to open output file");
 				if (file.size != file.size_decompressed) {
 					static u8vec deflate_header, deflate_data;
-					cpk::crilayla::deflate(buffer_stream, deflate_header, deflate_data);
+					cpk::crilayla::decompress(buffer_stream, deflate_header, deflate_data);
 					fwrite(deflate_header.data(), 1, deflate_header.size(), fout);
 					fwrite(deflate_data.data(), 1, deflate_data.size(), fout);
 					fclose(fout);
