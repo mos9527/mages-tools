@@ -6,6 +6,7 @@ namespace cpk {
 	constexpr uint32_t ITOC_MAGIC = fourCC('I', 'T', 'O', 'C');
 	constexpr uint32_t ITOC_MAGIC_BIG = fourCC('C', 'O', 'T', 'I');
 	constexpr uint64_t CRILAYLA_MAGIC = fourCC('C', 'R', 'I', 'L') | (uint64_t)fourCC('A', 'Y', 'L', 'A') << 32;
+	
 	namespace crilayla {
 		static void decompress(u8stream& stream, u8vec& header, u8vec& buffer) {
 			CHECK(!stream.is_big_endian());
@@ -24,25 +25,23 @@ namespace cpk {
 			std::span<uint8_t> compressed(stream.begin(), stream.begin() + compressed_size);
 			std::reverse(compressed.begin(), compressed.end());
 
-			size_t bit_pos = 0;
+			uint32_t bit_pos = 0;
 			auto read_n = [&](char nbits) -> uint16_t {
-				assert(nbits <= sizeof(uint16_t) * 8);
+				CHECK(nbits <= sizeof(uint16_t) * 8);
 				uint16_t ans = 0;
-				while (bit_pos / 8 < compressed.size() && nbits--) 
+				while (bit_pos / 8 < compressed_size && nbits--)
 					ans <<= 1, ans |= ((compressed[bit_pos / 8] >> (7 - bit_pos % 8 /* LE */)) & 1), bit_pos++;
 				return ans;
-			};
-			auto all_n_bits = [](auto value, char n) -> bool {
-				return value == (1 << n) - 1;
-			};
+				};
+			auto all_n_bits = [](auto value, char n) -> bool { return value == (1 << n) - 1; };
 
 			while (data_written < data_size)
 			{
 				uint8_t ctl = read_n(1);
 				if (ctl) {
 					auto offset = read_n(13) + 3; // backwards from the *back* of the output stream
-					size_t ref_count = 3; // previous bytes referenced. 3 minimum
-					const u8vec vle_n_bits{ 2, 3, 5, 8 };
+					uint32_t ref_count = 3; // previous bytes referenced. 3 minimum
+					constexpr uint8_t vle_n_bits[]{ 2, 3, 5, 8 };
 					for (int i = 0, n_bits = vle_n_bits[0];; i++, i = std::min(i, 3), n_bits = vle_n_bits[i]) {
 						uint16_t vle_length = read_n(n_bits);
 						ref_count += vle_length;
@@ -77,7 +76,7 @@ namespace cpk {
 			STRING = 0xA, DATA_ARRAY = 0xB,
 			INVALID = -1,
 		};
-		const size_t field_type_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
+		constexpr size_t field_type_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
 		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
 		template<Fundamental Cast> static std::optional<Cast> field_cast(utf::field_type const& field) {
 			return std::visit([&](auto&& arg) -> std::optional<Cast> {
@@ -103,8 +102,8 @@ namespace cpk {
 			uint16_t rowStride;
 			uint32_t rowCount;
 
-			constexpr uint32_t to_block_offset(uint32_t hdr_offset) { return hdr_offset + 8; }
-			constexpr uint32_t from_block_offset(uint32_t blk_offset) { return blk_offset - 8; }
+			const uint32_t to_block_offset(uint32_t hdr_offset) const { return hdr_offset + 8; }
+			const uint32_t from_block_offset(uint32_t blk_offset) const { return blk_offset - 8; }
 		};
 		struct table_field {
 			std::string name;
@@ -117,15 +116,15 @@ namespace cpk {
 			table_field(std::string const& name) : name(name) {}
 			table_field(std::string const& name, field_type_enum type, bool valid) : name(name), type(type), isValid(valid) {}
 			table_field(std::string const& name, std::vector<field_type> const& values) : name(name), values(values) {
-				isValid = true;
 				type = (field_type_enum)values.front().index();
+				isValid = true;
 			}
 			void set_flags(field_type_enum ntype, bool valid = false) { type = ntype, isValid = valid; }
 			void push_back(field_type const& value) {
 				if (type == field_type_enum::INVALID) type = (field_type_enum)value.index();
-				isValid = true;
 				CHECK((field_type_enum)value.index() == type, "Invalid field type");
 				values.push_back(value);
+				isValid = true;
 			}
 		};
 		struct table_stream : public u8stream {
@@ -201,6 +200,7 @@ namespace cpk {
 			}
 		};
 		struct table {
+			seq_ordered_named_stroage<std::string, table_field> fields;
 		private:
 			table_header hdr{};
 			table_stream stream;
@@ -221,8 +221,7 @@ namespace cpk {
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
 					uint32_t offset = stream.header.to_block_offset(stream.header.rowOffset) + j;
 					stream.seek(offset);
-					for (auto const& name : fields.ord) {
-						auto& field = fields.data[name];
+					for (auto& field : fields) {
 						if (!field.hasDefaultValue && field.isValid) {
 							field.push_back(stream.read_variant((field_type_enum)field.type));
 						}
@@ -231,12 +230,15 @@ namespace cpk {
 			}
 			void write_fields() {
 				stream.seek(sizeof(table_sub_header));
-				u8stream stringPool(0, false), dataPool(0, false);
+				static u8stream stringPool(0, false), dataPool(0, false);
+				stringPool.reset(), dataPool.reset();
 				// CPK string pool always has two strings before anything. And the look up process skips the first two char** as well.
 				// See: __int64 __fastcall criUtfRtv_LookUp(struct_a1 *a1, char *flag, char **strings)
-				stringPool << u8vec{ '<','N','U','L','L','>','\0','E','l',' ','P','s','y',' ', 'K','o','n','g','r','o','o','\0' };
-				for (auto const& name : fields.ord) {
-					auto& field = fields.data[name];
+				{
+					constexpr char padding[] = "<NULL>\0El Psy Kongroo\0";
+					stringPool.write((void*)padding, sizeof(padding), false);
+				}
+				for (auto const& field : fields) {
 					uint8_t flags = (int)field.type;
 					if (field.name.size()) flags |= 0x10;
 					if (field.hasDefaultValue) flags |= 0x20;
@@ -245,18 +247,17 @@ namespace cpk {
 					if (field.name.size()) stream.write_null_string(field.name, stringPool);
 					if (field.hasDefaultValue) stream.write_variant(field.values[0], stringPool, dataPool);
 				}
-				uint32_t rowCount = fields.ord.size() ? fields.data[fields.ord[0]].values.size() : 0, rowStride = 0;
+				uint32_t rowCount = fields.size() ? fields[0].values.size() : 0, rowStride = 0;
 				stream.header.rowOffset = stream.header.from_block_offset(stream.tell());
 				for (int i = 0; i < rowCount; i++) {
-					for (auto const& name : fields.ord) {
-						auto& field = fields.data[name];
+					for (auto& field : fields) {
 						if (!field.hasDefaultValue && field.isValid) {
 							stream.write_variant(field.values[i], stringPool, dataPool);
 							if (i == 0) rowStride += field_type_sizes[(size_t)field.type];
 						}
 					}
 				}
-				stream.header.fieldCount = fields.ord.size();
+				stream.header.fieldCount = fields.size();
 				stream.header.rowCount = rowCount, stream.header.rowStride = rowStride;
 				stream.header.stringPoolOffset = stream.header.from_block_offset(stream.tell());
 				stream << stringPool.buffer;
@@ -267,21 +268,6 @@ namespace cpk {
 				stream.write_header();
 			}
 		public:
-			struct field_storage {
-				friend table;
-			private:
-				std::vector<std::string> ord;
-				std::map<std::string, table_field> data;
-			public:
-				const size_t size() const { return ord.size(); }
-				bool contains(std::string const& name) { return data.contains(name); }
-				table_field& operator[](std::string const& name) {
-					auto it = data.try_emplace(name, table_field{ name });
-					if (it.second) ord.push_back(name);
-					return data.at(name);
-				}
-				void reset() { ord.clear(); data.clear(); }
-			} fields;
 			static void mask_table_data(u8vec& buffer) {
 				for (int i = 0, j = 25951; i < buffer.size(); i++, j *= 16661)
 					buffer[i] ^= (j & 0xFF);
@@ -315,7 +301,10 @@ namespace cpk {
 			}
 		};
 	}
+}
 
+namespace package {
+	using namespace cpk;
 	struct file_entry {
 		uint16_t id;
 		uint64_t size;
@@ -331,12 +320,19 @@ namespace cpk {
 		std::optional<std::string> storedPath;
 	};
 	typedef std::vector<packed_file_entry> packed_file_entries;
-	/* ITOC packer mode
-		- Filenames are unavailable in this mode
-		- The files are stored (and sorted) by their IDs and optionally compressed
+	struct scheme {
+		virtual void pack(FILE* fp, file_entries& files) = 0;
+		virtual packed_file_entries unpack(FILE* fp) = 0;
+	};
+	/* -- CPK Package schemes -- */
+	/*
+	ITOC scheme
+	- Filenames are unavailable in this mode
+	- The files are stored (and sorted) by their IDs and optionally compressed
+	- Compression is not implemented here
 	*/
-	struct itoc_mode {
-		static void pack(FILE* fp, file_entries& files) {
+	struct ITOC : public scheme {
+		virtual void pack(FILE* fp, file_entries& files) {
 			using enum utf::field_type_enum;
 			const uint32_t ITOC_HDR_LENGTH_OFFSET = 0x10;
 			const uint16_t Align = 2048;
@@ -399,7 +395,7 @@ namespace cpk {
 			fwrite(CPKBuffer.data(), 1, CPKBuffer.size(), fp);
 			fclose(fp);
 		}
-		static packed_file_entries unpack(FILE* fp) {
+		virtual packed_file_entries unpack(FILE* fp) {
 			packed_file_entries files;
 			utf::table CPK(utf::table::read_table_data(fp, CPK_MAGIC));
 			uint64_t ItocOffset = utf::field_cast<uint64_t>(CPK.fields["ItocOffset"].values[0]).value();
@@ -459,30 +455,31 @@ int main(int argc, char* argv[]) {
 
 	{
 		using namespace std::filesystem;
+		std::unique_ptr<package::scheme> scheme(new package::ITOC);
 		if (args.repack.size()) { /* packing */
 			path output = path(args.repack);
 			if (output.has_parent_path() && !exists(output.parent_path()))
 				create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file");
-			cpk::file_entries files;
+			package::file_entries files;
 			uint32_t id = 0;
 			CHECK(exists(args.outdir) && is_directory(args.outdir), "Invalid input directory");
 			for (auto& path : directory_iterator(args.outdir)) {
 				std::stringstream ss(path.path().filename().string());
 				uint16_t id; ss >> id;
-				files.push_back(cpk::file_entry{
+				files.push_back(package::file_entry{
 					.id = id,
 					.size = static_cast<uint32_t>(file_size(path)),
 					.path = path.path().string()
 					});
 			}
-			cpk::itoc_mode::pack(fp, files);
+			scheme->pack(fp, files);
 		}
 		else { /* unpacking */
 			FILE* fp = fopen(args.infile.c_str(), "rb");
 			CHECK(fp, "Failed to open input file");
-			cpk::packed_file_entries files = cpk::itoc_mode::unpack(fp);
+			package::packed_file_entries files = scheme->unpack(fp);
 			uint32_t id = 0;
 			for (auto& file : files) {
 				u8stream buffer_stream(file.size, false);
@@ -506,7 +503,6 @@ int main(int argc, char* argv[]) {
 					fclose(fout);
 				}
 			}
-			return 0;
 		}
 	}
 	return 0;

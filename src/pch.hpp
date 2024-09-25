@@ -9,6 +9,7 @@
 #include <span>
 #include <source_location>
 #include <variant>
+#include <memory>
 #include "argh.h"
 #define PRED(X) [](auto const& lhs, auto const& rhs) {return X;}
 #define PAIR2(T) std::pair<T,T>
@@ -35,6 +36,7 @@ inline void dump_memory(const char* fname, void* src, size_t size) {
 template<typename T> concept Fundamental = std::is_fundamental_v<T>;
 typedef std::vector<uint8_t> u8vec;
 // Owning u8vec wrapper with stream operations
+// NOTE: Value parameters are type-sensitive.
 struct u8stream {
 private:
 	size_t pos;
@@ -51,7 +53,8 @@ public:
 	inline size_t size() const { return buffer.size(); }
 	// FILE* like operations
 	inline bool is_big_endian() const { return big_endian; }
-	inline void resize(size_t size) { buffer.resize(size); }
+	inline void resize(size_t size) { buffer.resize(size), pos = std::min(pos, size); }
+	inline void reset() { resize(0); }
 	inline size_t remain() const {
 		return buffer.size() - pos;
 	}
@@ -128,4 +131,27 @@ public:
 	// Iterators
 	inline u8vec::iterator begin() { return buffer.begin() + pos; }
 	inline u8vec::iterator end() { return buffer.end(); }
+};
+template<typename T, typename NameType> concept name_constructible = requires { T(NameType{}); };
+// Sequential ordered named storage
+template<typename NameType, name_constructible<NameType> T> struct seq_ordered_named_stroage {
+	typedef std::vector<T> storage_container;
+	typedef std::map<NameType, size_t> lut_container;
+private:
+	storage_container data;
+	lut_container lut;
+public:
+	// Query or create by name
+	T& operator[](NameType const& name) {
+		auto it = lut.try_emplace(name, data.size());
+		if (it.second) data.push_back(T{ name });
+		return data[lut[name]];
+	}
+	// Query by index w/o bounds checking
+	T& operator[](size_t index) { return data[index]; }
+	const size_t size() const { return data.size(); }
+	void reset() { data.clear(); lut.clear(); }
+	bool contains(NameType const& name) { return lut.contains(name); }
+	storage_container::iterator begin() { return data.begin(); }
+	storage_container::iterator end() { return data.end(); }
 };
