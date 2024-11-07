@@ -66,7 +66,7 @@ namespace cpk {
 	};
 
 	namespace utf {
-		enum class field_type_enum {
+		enum class field_type {
 			UINT8 = 0, INT8 = 1,
 			UINT16 = 2, INT16 = 3,
 			UINT32 = 4, INT32 = 5,
@@ -76,16 +76,15 @@ namespace cpk {
 			STRING = 0xA, DATA_ARRAY = 0xB,
 			INVALID = -1,
 		};
-		constexpr size_t field_type_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
-		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field_type;
-		template<Fundamental Cast> static std::optional<Cast> field_cast(utf::field_type const& field) {
+		constexpr size_t field_sizes[] = { sizeof(uint8_t), sizeof(int8_t), sizeof(uint16_t), sizeof(int16_t), sizeof(uint32_t), sizeof(int32_t), sizeof(uint64_t), sizeof(int64_t), sizeof(float), sizeof(double), sizeof(uint32_t), sizeof(uint32_t) };
+		typedef std::variant<uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, float, double, std::string, u8vec> field;
+		template<Fundamental Cast> inline std::optional<Cast> field_cast(utf::field const& field) {
 			return std::visit([&](auto&& arg) -> std::optional<Cast> {
 				using T = std::decay_t<decltype(arg)>;
 				if constexpr (std::is_convertible_v<T, Cast>) return arg;
 				return {};
-				}, field);
+			}, field);
 		}
-
 		struct table_header {
 			uint32_t magic;
 			uint32_t _pad;
@@ -109,20 +108,20 @@ namespace cpk {
 			std::string name;
 			bool hasDefaultValue{ false };
 			bool isValid{ false };
-			field_type_enum type{ field_type_enum::INVALID };
-			std::vector<field_type> values;
+			field_type type{ field_type::INVALID };
+			std::vector<field> values;
 
 			table_field() = default;
 			table_field(std::string const& name) : name(name) {}
-			table_field(std::string const& name, field_type_enum type, bool valid) : name(name), type(type), isValid(valid) {}
-			table_field(std::string const& name, std::vector<field_type> const& values) : name(name), values(values) {
-				type = (field_type_enum)values.front().index();
+			table_field(std::string const& name, field_type type, bool valid) : name(name), type(type), isValid(valid) {}
+			table_field(std::string const& name, std::vector<field> const& values) : name(name), values(values) {
+				type = (field_type)values.front().index();
 				isValid = true;
 			}
-			void set_flags(field_type_enum ntype, bool valid = false) { type = ntype, isValid = valid; }
-			void push_back(field_type const& value) {
-				if (type == field_type_enum::INVALID) type = (field_type_enum)value.index();
-				CHECK((field_type_enum)value.index() == type, "Invalid field type");
+			void reset(field_type ntype, bool valid = false) { type = ntype, isValid = valid; }
+			void push_back(field const& value) {
+				if (type == field_type::INVALID) type = (field_type)value.index();
+				CHECK((field_type)value.index() == type, "Invalid field type");
 				values.push_back(value);
 				isValid = true;
 			}
@@ -164,8 +163,8 @@ namespace cpk {
 				size_t size = dataPool.write((void*)buffer.data(), buffer.size(), false);
 				return size;
 			}
-			field_type read_variant(field_type_enum type) {
-				using enum field_type_enum;
+			field read_variant(field_type type) {
+				using enum field_type;
 				switch (type) {
 				case UINT8: return read<uint8_t>(); break;
 				case INT8: return read<int8_t>(); break;
@@ -183,7 +182,7 @@ namespace cpk {
 					return 0;
 				};
 			}
-			void write_variant(field_type const& value, u8stream& stringPool, u8stream& dataPool) {
+			void write_variant(field const& value, u8stream& stringPool, u8stream& dataPool) {
 				std::visit([&](auto&& arg) {
 					using T = std::decay_t<decltype(arg)>;
 					if constexpr (std::is_same_v<T, std::string>) {
@@ -210,12 +209,12 @@ namespace cpk {
 				for (int i = 0; i < stream.header.fieldCount; i++) {
 					uint8_t flags = stream.read<uint8_t>();
 					table_field field;
-					field.type = (field_type_enum)(flags & 0xF);
+					field.type = (field_type)(flags & 0xF);
 					field.name = (flags & 0x10) ? stream.read_null_string() : "";
 					field.hasDefaultValue = (flags & 0x20) != 0;
 					field.isValid = ((flags & 0x40) != 0);
 					if (field.hasDefaultValue)
-						field.push_back(stream.read_variant((field_type_enum)field.type));
+						field.push_back(stream.read_variant((field_type)field.type));
 					fields[field.name] = field;
 				}
 				for (int i = 0, j = 0; i < stream.header.rowCount; i++, j += stream.header.rowStride) {
@@ -223,7 +222,7 @@ namespace cpk {
 					stream.seek(offset);
 					for (auto& field : fields) {
 						if (!field.hasDefaultValue && field.isValid) {
-							field.push_back(stream.read_variant((field_type_enum)field.type));
+							field.push_back(stream.read_variant((field_type)field.type));
 						}
 					}
 				}
@@ -253,7 +252,7 @@ namespace cpk {
 					for (auto& field : fields) {
 						if (!field.hasDefaultValue && field.isValid) {
 							stream.write_variant(field.values[i], stringPool, dataPool);
-							if (i == 0) rowStride += field_type_sizes[(size_t)field.type];
+							if (i == 0) rowStride += field_sizes[(size_t)field.type];
 						}
 					}
 				}
@@ -333,7 +332,7 @@ namespace package {
 	*/
 	struct ITOC : public scheme {
 		virtual void pack(FILE* fp, file_entries& files) {
-			using enum utf::field_type_enum;
+			using enum utf::field_type;
 			const uint32_t ITOC_HDR_LENGTH_OFFSET = 0x10;
 			const uint16_t Align = 2048;
 			const uint64_t ItocOffset = 0x800;
@@ -343,9 +342,9 @@ namespace package {
 			// DataL only stores files up to 64KB (UINT16). 
 			// We'd put everything into DataH for now since it
 			// allows up to 2GB of data	
-			DataL.fields["ID"].set_flags(UINT16);
-			DataL.fields["FileSize"].set_flags(UINT16);
-			DataL.fields["ExtractSize"].set_flags(UINT16);
+			DataL.fields["ID"].reset(UINT16);
+			DataL.fields["FileSize"].reset(UINT16);
+			DataL.fields["ExtractSize"].reset(UINT16);
 			for (auto& file : files) {
 				DataH.fields["ID"].push_back((uint16_t)file.id);
 				DataH.fields["FileSize"].push_back((uint32_t)file.size);
@@ -410,7 +409,7 @@ namespace package {
 						0,
 						utf::field_cast<uint64_t>(table.fields["FileSize"].values[i]).value(),
 						utf::field_cast<uint64_t>(table.fields["ExtractSize"].values[i]).value()
-						});
+					});
 				}
 				};
 			if (Itoc.fields.contains("DataL")) { utf::table DataL(std::get<u8vec>(Itoc.fields["DataL"].values[0])); populate_file_ids(DataL); }
@@ -462,8 +461,7 @@ int main(int argc, char* argv[]) {
 				create_directories(output.parent_path());
 			FILE* fp = fopen(output.string().c_str(), "wb");
 			CHECK(fp, "Failed to open output file");
-			package::file_entries files;
-			uint32_t id = 0;
+			package::file_entries files;			
 			CHECK(exists(args.outdir) && is_directory(args.outdir), "Invalid input directory");
 			for (auto& path : directory_iterator(args.outdir)) {
 				std::stringstream ss(path.path().filename().string());
